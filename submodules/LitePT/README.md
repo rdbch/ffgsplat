@@ -33,6 +33,18 @@ University of Zurich
 ## Preparation
 
 ### Environment
+
+> **Installing as part of ffgsplat?** From the repo root, `./install.sh` installs this submodule's Python dependencies from the root [`pyproject.toml`](../../pyproject.toml) (moved there from this project's `requirements.txt`), then builds every submodule, including this one, via [`setup.sh`](./setup.sh). To build just this submodule's CUDA extensions (after PyTorch and the pyproject.toml dependencies are already installed in your active env):
+> ```shell
+> cd submodules/LitePT
+> ./setup.sh                                    # spconv + flash-attn + pointrope
+> ./setup.sh --with-extras --cuda-arch=80        # also pointops + pointgroup_ops, for an A100
+> ./setup.sh --skip-flash-attn                   # skip the slow flash-attention build
+> ```
+> `--cuda-arch` patches the hardcoded `all_cuda_archs` in `libs/pointrope/setup.py` (default `90`/H100) before building — see [gpus](https://developer.nvidia.com/cuda-gpus) for your value. `--with-extras` also builds `pointops` and `pointgroup_ops`; `pointgroup_ops` additionally needs `conda install -c bioconda google-sparsehash` first. Every `pip install` uses `--no-cache-dir --user`, suited to a shared conda env on a GPU cluster.
+>
+> The manual steps below describe what the script automates, and are the reference if you're installing LitePT standalone (outside ffgsplat).
+
 - Create an environment and install pytorch and other required packages:
   ```shell
   git clone https://github.com/prs-eth/LitePT.git

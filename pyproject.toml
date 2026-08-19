@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ffgsplat"
+version = "0.1.0"
+description = "Very Fast GS"
+requires-python = ">=3.11"
+dependencies = [
+    # PyTorch is intentionally not listed here: install it first, matching
+    # your cluster's CUDA version (see readme.md), then run ./install.sh
+
+    # required by submodules/LitePT (moved from its requirements.txt)
+    "h5py",
+    "pyyaml",
+    "sharedarray",
+    "tensorboard",
+    "tensorboardx",
+    "wandb",
+    "yapf",
+    "addict",
+    "einops",
+    "scipy",
+    "plyfile",
+    "termcolor",
+    "timm",
+    "torch-cluster",
+    "torch-scatter",
+    "torch-sparse",
+    "torch-geometric==2.5.3",
+    "colorhash",
+    "torchmetrics",
+    "spconv-cu124",
+]
+
+[project.optional-dependencies]
+dev = [
+    # test/lint tooling, e.g. "pytest", "ruff"
+]
+
+# No installable package code at the repo root yet -- this file exists to
+# hold project metadata and dependencies. Disables setuptools' automatic
+# package discovery, which would otherwise try to scan submodules/.
+[tool.setuptools]
+packages = []
