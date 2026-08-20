@@ -11,7 +11,7 @@ Intended for a conda environment on a GPU cluster; every `pip install` uses `--n
 conda create -n ffgsplat python=3.11
 conda activate ffgsplat
 # install pytorch first, matching your cluster's CUDA version
-pip install --no-cache-dir --user "torch==2.13.*" torchvision --index-url https://download.pytorch.org/whl/cu126
+pip install --no-cache-dir --user torch==2.12.1 torchvision==0.27.1 --index-url https://download.pytorch.org/whl/cu126
 
 ./install.sh
 ```
