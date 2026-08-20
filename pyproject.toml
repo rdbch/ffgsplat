@@ -31,7 +31,7 @@ dependencies = [
     "torch-geometric==2.5.3",
     "colorhash",
     "torchmetrics",
-    "spconv-cu124",
+    "spconv-cu126",
 ]
 
 [project.optional-dependencies]
