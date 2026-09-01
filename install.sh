@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+module load miniforge
+module load arch/h100
+module load cuda/12.8.0
+conda activate ffs_311
+
+export HF_HOME=$WORK/cache_dir 
+export TORCH_HOME=$WORK/cache_dir/torch 
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH 
+
+
+
 # Root installer for ffgsplat and its submodules.
 #
 # Run inside an already-activated conda environment:
-#   conda create -n ffgsplat python=3.10
-#   conda activate ffgsplat
+#   conda create -n ffgs_311 python=3.11
+#   conda activate ffgs_311
 #   ./install.sh [options]
 #
 # Any options are forwarded, unchanged, to every submodule's setup.sh --
@@ -18,7 +29,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUBMODULES_DIR="${REPO_ROOT}/submodules"
 
-export PIP_INSTALL_FLAGS="--no-cache-dir --user"
+export PIP_INSTALL_FLAGS="--no-cache-dir --user --no-build-isolation"
 
 if [ -z "${CONDA_DEFAULT_ENV:-}" ]; then
   echo "error: no active conda environment detected. Run 'conda activate <env>' first." >&2

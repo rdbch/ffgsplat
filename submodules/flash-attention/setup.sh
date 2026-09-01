@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+module load miniforge
+module load arch/h100
+module load cuda/12.8.0
+conda activate mgs_311
+
+export HF_HOME=$WORK/cache_dir 
+export TORCH_HOME=$WORK/cache_dir/torch 
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH 
+export MAX_JOBS=4
+export NVCC_THREADS=2
 # Build rules for the flash-attention submodule.
 #
 # Builds from this local clone (not from PyPI or a remote git URL), so the
@@ -15,7 +25,7 @@ set -euo pipefail
 # and can take a long time.
 
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PIP_INSTALL_FLAGS="${PIP_INSTALL_FLAGS:---no-cache-dir --user}"
+PIP_INSTALL_FLAGS="${PIP_INSTALL_FLAGS:---no-cache-dir --user --no-build-isolation}"
 
 cd "${MODULE_DIR}"
 

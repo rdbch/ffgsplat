@@ -6,6 +6,7 @@ from huggingface_hub import hf_hub_download
 
 from datasets.transform import Compose
 from litept.model import LitePT
+import time
 
 if __name__ == "__main__":
 
@@ -17,12 +18,13 @@ if __name__ == "__main__":
 
     ### optional, load pretrained weights
     ### e.g. we load pretrained weights on NuScenes semantic segmentation
-    ckpt_path = hf_hub_download(
-        repo_id="prs-eth/LitePT",
-        filename="nuscenes-semseg-litept-small-v1m1/model/model_best.pth",
-        repo_type="model"
-    )
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+    # ckpt_path = hf_hub_download(
+    #     repo_id="prs-eth/LitePT",
+    #     filename="nuscenes-semseg-litept-small-v1m1/model/model_best.pth",
+    #     repo_type="model"
+    # )
+    # ckpt = torch.load(ckpt_path, map_location="cpu")
+    ckpt = torch.load("checkpoints/model_best.pth", map_location="cpu", weights_only=False)
     weight = OrderedDict()
     prefix = "module.backbone."
     for key, value in ckpt["state_dict"].items():
@@ -31,15 +33,16 @@ if __name__ == "__main__":
             weight[new_key] = value
     model.load_state_dict(weight, strict=True)
     model.eval()
-
+    print("Model loaded")
     ### Step 2. prepare data
     ### we take an example scene from NuScenes, the input is a N×4 array [x,y,z,strength]
-    lidar_path = hf_hub_download(
-            repo_id="prs-eth/LitePT_demo",
-            filename=f"outdoor_sample1.bin",
-            repo_type="dataset",
-            revision="main",
-        )
+    # lidar_path = hf_hub_download(
+    #         repo_id="prs-eth/LitePT_demo",
+    #         filename=f"outdoor_sample1.bin",
+    #         repo_type="dataset",
+    #         revision="main",
+    #     )
+    lidar_path = "./data/outdoor_sample1.bin"
     points = np.fromfile(lidar_path, dtype=np.float32, count=-1).reshape(
             [-1, 5]
         )
@@ -71,18 +74,28 @@ if __name__ == "__main__":
     transform = Compose(data_config)
     point = transform(point)
 
+    all_times = []
     ### Step 3. forward the model
-    with torch.no_grad():
-        for key in point.keys():
-            if isinstance(point[key], torch.Tensor):
-                point[key] = point[key].cuda(non_blocking=True)
-        # forward
-        point = model(point) # [N_down, C]
-        # point is downsampled by GridSample in transform
-        print("Downsampled output feature: ", point.feat.shape)
-        # obtain per-point feature
-        dense_feat = point.feat[point.inverse] # [N, C]
-        print("Dense output feature: ", dense_feat.shape)
+    for i in range(1000):
+        t0 = time.time()
+        with torch.no_grad():
+            for key in point.keys():
+                if isinstance(point[key], torch.Tensor):
+                    point[key] = point[key].cuda(non_blocking=True)
+            # forward
+            pppp = model(point) # [N_down, C]
+            # point is downsampled by GridSample in transform
+            print("Downsampled output feature: ", pppp.feat.shape)
+        t1 = time.time()
+        all_times.append(t1-t0)
+    print(np.array(all_times).mean())
+    print(np.array(all_times).min())
+    print(np.array(all_times).max())
+    print(np.median(np.array(all_times)))
+    
+    # obtain per-point feature
+    dense_feat = pppp.feat[pppp.inverse] # [N, C]
+    print("Dense output feature: ", dense_feat.shape)
 
     ### Done! That's how to use LitePT to encode a point cloud.
 
