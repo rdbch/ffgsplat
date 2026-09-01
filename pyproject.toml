@@ -33,6 +33,13 @@ dependencies = [
     "colorhash",
     "torchmetrics",
     "spconv-cu126",
+
+    # required by submodules/gsplat (build- and run-time; ninja drives its
+    # CUDA build, so it must be installed before that submodule's setup.sh)
+    "ninja",
+    "numpy",
+    "jaxtyping",
+    "rich>=12",
 ]
 
 [project.optional-dependencies]

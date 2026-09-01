@@ -22,4 +22,6 @@ Root project dependencies live in [`pyproject.toml`](./pyproject.toml) — add p
 ./install.sh --with-extras --cuda-arch=80   # A100; see submodules/LitePT/setup.sh for its flags
 ```
 
+`--cuda-arch=ARCH` is understood by both `LitePT` and `gsplat` (each defaults to `90`, H100); unknown flags are ignored by every submodule, so one invocation can carry all of them.
+
 To install or rebuild a single submodule, run its `setup.sh` directly from its own directory (see that submodule's README).
