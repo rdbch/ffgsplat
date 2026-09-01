@@ -8,8 +8,8 @@ This repo is organized as a root project plus a set of vendored submodules under
 Intended for a conda environment on a GPU cluster; every `pip install` uses `--no-cache-dir --user` (tight home/scratch quotas, shared envs are often read-only).
 
 ```shell
-conda create -n ffgsplat python=3.11
-conda activate ffgsplat
+conda create -n ffgs_311 python=3.11
+conda activate ffgs_311
 # install pytorch first, matching your cluster's CUDA version
 pip install --no-cache-dir --user torch==2.12.1 torchvision==0.27.1 --index-url https://download.pytorch.org/whl/cu126
 

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch_scatter
-import torch_cluster
+# import torch_cluster
 
 from models.losses import build_criteria
 from models.utils.structure import Point

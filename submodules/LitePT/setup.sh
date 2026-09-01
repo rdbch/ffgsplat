@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+module load miniforge
+module load arch/h100
+module load cuda/12.8.0
+conda activate ffgs_311
+
+export HF_HOME=$WORK/cache_dir 
+export TORCH_HOME=$WORK/cache_dir/torch 
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH 
+
 # Build rules for the LitePT submodule.
 #
 # Assumes an already-activated conda env with PyTorch + CUDA toolkit and
@@ -31,7 +40,7 @@ MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # On a GPU cluster, home/project quotas are often small and shared envs are
 # frequently not writable by the user -- so every pip call disables the
 # build cache and installs to the user site-packages.
-PIP_INSTALL_FLAGS="${PIP_INSTALL_FLAGS:---no-cache-dir --user}"
+PIP_INSTALL_FLAGS="${PIP_INSTALL_FLAGS:---no-cache-dir --user --no-build-isolation}"
 
 WITH_EXTRAS=0
 CUDA_ARCH="90"
@@ -55,15 +64,13 @@ sed -i.bak -E "s/arch=compute_[0-9]+,code=sm_[0-9]+/arch=compute_${CUDA_ARCH},co
 rm -f libs/pointrope/setup.py.bak
 ( cd libs/pointrope && pip install ${PIP_INSTALL_FLAGS} . )
 
-if [ "${WITH_EXTRAS}" -eq 1 ]; then
-  echo "==> [LitePT] Building pointops CUDA extension (evaluator)"
-  ( cd libs/pointops && pip install ${PIP_INSTALL_FLAGS} . )
 
-  echo "==> [LitePT] Building pointgroup_ops CUDA extension (PointGroup instance segmentation)"
-  echo "    Requires google-sparsehash: conda install -c bioconda google-sparsehash"
-  ( cd libs/pointgroup_ops && pip install ${PIP_INSTALL_FLAGS} . )
-else
-  echo "==> [LitePT] Skipping pointops / pointgroup_ops (pass --with-extras to build them)"
-fi
+echo "==> [LitePT] Building pointops CUDA extension (evaluator)"
+( cd libs/pointops && pip install ${PIP_INSTALL_FLAGS} . )
+
+echo "==> [LitePT] Building pointgroup_ops CUDA extension (PointGroup instance segmentation)"
+echo "    Requires google-sparsehash: conda install -c bioconda google-sparsehash"
+( cd libs/pointgroup_ops && pip install ${PIP_INSTALL_FLAGS} . )
+
 
 echo "==> [LitePT] Done."
