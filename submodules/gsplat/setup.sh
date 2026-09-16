@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-module load miniforge
-module load arch/h100
-module load cuda/12.8.0
-conda activate ffgs_311
+
+export_cuda128() {
+    export CUDA_HOME="/usr/local/cuda-12.8"
+    export PATH="$CUDA_HOME/bin:$PATH"
+    export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+}
+
+if command -v module >/dev/null 2>&1; then
+    module load miniforge
+    module load arch/h100
+    module load cuda/12.8.0
+elif command -v export_cuda128 >/dev/null 2>&1; then
+    export_cuda128
+else
+    echo "No CUDA environment setup command found" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 export HF_HOME=$WORK/cache_dir
 export TORCH_HOME=$WORK/cache_dir/torch
@@ -66,8 +79,8 @@ if [ ! -f "${GLM_DIR}/glm/glm.hpp" ]; then
 fi
 
 # Keep nvcc from saturating a shared login/compute node.
-export MAX_JOBS="${MAX_JOBS:-4}"
-export NVCC_THREADS="${NVCC_THREADS:-2}"
+export MAX_JOBS=8
+export NVCC_THREADS=2
 # torch wants a dotted arch list ("9.0"), the other setup.sh scripts take a
 # plain gencode number ("90") -- convert, unless the caller set it already.
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-${CUDA_ARCH%?}.${CUDA_ARCH: -1}}"

@@ -71,7 +71,7 @@ NVCC_THREADS = os.getenv("NVCC_THREADS") or "4"
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
-    return os.getenv("FLASH_ATTN_CUDA_ARCHS", "80;90").split(";")
+    return os.getenv("FLASH_ATTN_CUDA_ARCHS", "80").split(";")
 
 
 def get_platform():

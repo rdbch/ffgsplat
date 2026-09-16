@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-module load miniforge
-module load arch/h100
-module load cuda/12.8.0
-conda activate ffgs_311
+export_cuda128() {
+    export CUDA_HOME="/usr/local/cuda-12.8"
+    export PATH="$CUDA_HOME/bin:$PATH"
+    export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+}
+
+if command -v module >/dev/null 2>&1; then
+    module load miniforge
+    module load arch/h100
+    module load cuda/12.8.0
+elif command -v export_cuda128 >/dev/null 2>&1; then
+    export_cuda128
+else
+    echo "No CUDA environment setup command found" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+
+# conda activate ffgs_311
 
 export HF_HOME=$WORK/cache_dir 
 export TORCH_HOME=$WORK/cache_dir/torch 
@@ -43,7 +58,7 @@ MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIP_INSTALL_FLAGS="${PIP_INSTALL_FLAGS:---no-cache-dir --user --no-build-isolation}"
 
 WITH_EXTRAS=0
-CUDA_ARCH="90"
+CUDA_ARCH="86"
 
 for arg in "$@"; do
   case "${arg}" in
