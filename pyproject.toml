@@ -40,6 +40,13 @@ dependencies = [
     "numpy",
     "jaxtyping",
     "rich>=12",
+
+    # required by core/ (config tree) and data/ (COLMAP parsing, image I/O)
+    "omegaconf",
+    "pycolmap",
+    "opencv-python",
+    "imageio",
+    "pillow",
 ]
 
 [project.optional-dependencies]

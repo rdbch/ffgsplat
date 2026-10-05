@@ -1,7 +1,7 @@
 from omegaconf import OmegaConf
 
 from configs import Config
-from trainer import Trainer
+from core.trainer import Trainer
 
 
 def main():
@@ -9,14 +9,16 @@ def main():
     cfg = OmegaConf.merge(cfg, OmegaConf.from_cli())
 
     trainer = Trainer(cfg)
+    trainer.build_dataloaders()
     trainer.build_model()
     trainer.build_optimizer()
-    trainer.build_dataloaders()
 
     if cfg.trainer.resume:
         trainer.load_checkpoint(cfg.trainer.resume)
+    trainer.build_logger()
 
     trainer.train()
+    trainer.logger.finish()
 
 
 if __name__ == "__main__":

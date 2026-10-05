@@ -98,7 +98,8 @@ class Point(Dict):
         # Although depth is limited to less than 16, we can encode a 655.36^3 (2^16 * 0.01) meter^3
         # cube with a grid size of 0.01 meter. We consider it is enough for the current stage.
         # We can unlock the limitation by optimizing the z-order encoding function if necessary.
-        assert depth <= 16
+        
+        assert depth <= 16, depth
 
         # The serialization codes are arranged as following structures:
         # [Order1 ([n]),
@@ -874,7 +875,10 @@ class LitePT(PointModule):
            or/and
            batch [N]: batch index of each point
         """
-        point = Point(data_dict)
+        point = data_dict
+        if not isinstance(point, Point):
+            point = Point(point)
+        
         if self.enc_attn[0]:
             point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
