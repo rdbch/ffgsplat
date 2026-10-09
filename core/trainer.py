@@ -1,5 +1,6 @@
 import sys
 import math
+import contextlib
 import random
 import torch
 import numpy as np
@@ -22,6 +23,7 @@ from torchmetrics.image import (
     StructuralSimilarityIndexMeasure,
 )
 
+from data.augment import augment, max_expansion
 from data.datasets.colmap import Dataset, DatasetConfig, Parser, ParserConfig
 from models.point_model import LitePtGSModel
 
@@ -71,6 +73,26 @@ def _collate_camera_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         else:
             out[key] = values
     return out
+
+
+@contextlib.contextmanager
+def bn_batch_stats(model: nn.Module, enabled: bool = True):
+    """Within the block, BatchNorm layers normalize with the current batch's
+    statistics (training behavior) without updating their running stats;
+    every other module keeps its mode (e.g. DropPath stays off in eval)."""
+    bns = [m for m in model.modules() if isinstance(m, nn.modules.batchnorm._BatchNorm)] if enabled else []
+    saved = [(m.training, m.momentum, m.num_batches_tracked.clone()) for m in bns]
+    for m in bns:
+        # momentum 0: running = 1 * running + 0 * batch, i.e. unchanged.
+        m.train()
+        m.momentum = 0.0
+    try:
+        yield
+    finally:
+        for m, (training, momentum, tracked) in zip(bns, saved):
+            m.train(training)
+            m.momentum = momentum
+            m.num_batches_tracked.copy_(tracked)
 
 
 @dataclass
@@ -182,6 +204,12 @@ class ModelConfig:
     # features instead of per-point ones -- not used for point-conditioned GS
     # prediction, which needs one output per input point.
     enc_mode: bool = False
+    # Norm used in the stem and the grid pooling/unpooling layers (attention
+    # blocks always use LayerNorm). "batch" is LitePT's BatchNorm; "layer" is
+    # per-point LayerNorm, which has no running statistics, so eval matches
+    # training even when every step sees a differently posed cloud
+    # (augmentation), where BatchNorm's running averages fit no single pose.
+    norm: str = "batch"
 
 
 @dataclass
@@ -217,6 +245,12 @@ class TrainerConfig:
     """Config for `Trainer`, structured so it can be embedded in an OmegaConf tree."""
 
     device: str = "cuda"
+    # Cap on this process's share of GPU memory (`torch.cuda.
+    # set_per_process_memory_fraction`); `None` = no cap. With a cap, PyTorch's
+    # caching allocator frees its cache and retries before the card is full,
+    # instead of letting the WSL2/WDDM driver silently spill allocations into
+    # system RAM (no OOM, just a ~100x slowdown).
+    cuda_memory_fraction: Optional[float] = None
     num_steps: int = 100
     # Evaluate on the full eval split every this many steps (and at the last step).
     eval_every: int = 1000
@@ -244,10 +278,22 @@ class TrainerConfig:
     point_grid_size: float = 0.01
     # Loss and rendering settings, same meaning/defaults as `simple_trainer.py`.
     ssim_lambda: float = 0.2
+    # MCMC's regularizers (`simple_trainer.py`'s `opacity_reg`/`scale_reg`,
+    # 0.01 each in its MCMC preset): weight on the mean activated opacity and
+    # the mean activated scale over all Gaussians, pushing them to be as
+    # transparent / small as the render loss allows. 0 disables.
+    opacity_reg: float = 0.0
+    scale_reg: float = 0.0
     # Composite each training render over a random solid color (per view)
     # instead of black, so Gaussians can't lean on a black background for
     # dark/empty regions. Eval always renders over black.
     random_bkgd: bool = True
+    # Normalize with the evaluated cloud's own statistics in BatchNorm layers
+    # at eval (as in training, where each batch is one whole cloud) instead of
+    # the running averages. Needed with augmentation + `model.norm="batch"`:
+    # the running averages mix all random poses and fit none, which blows up
+    # predicted scales at eval. No-op for `model.norm="layer"`.
+    eval_bn_batch_stats: bool = False
     sh_degree_interval: int = 1000
     near_plane: float = 0.01
     far_plane: float = 1e10
@@ -258,6 +304,9 @@ class Trainer:
         self.cfg = cfg
 
         self.device = torch.device(cfg.trainer.device if torch.cuda.is_available() else "cpu")
+        if self.device.type == "cuda" and cfg.trainer.cuda_memory_fraction is not None:
+            index = self.device.index if self.device.index is not None else torch.cuda.current_device()
+            torch.cuda.set_per_process_memory_fraction(cfg.trainer.cuda_memory_fraction, index)
 
         self.model = None
         self.optimizer = None
@@ -357,6 +406,10 @@ class Trainer:
         # arrays are filtered with the same mask to stay aligned.
         means = self.parser.gaussian_means
         half_extent = (2**16 - 1) * self.cfg.trainer.point_grid_size / 2
+        # Training augmentation can rotate/scale the cloud (and shift the grid
+        # by up to a voxel), so leave room for its worst-case extent.
+        if self.cfg.augment.enabled:
+            half_extent = (half_extent - self.cfg.trainer.point_grid_size) / max_expansion(self.cfg.augment)
         keep = (np.abs(means - np.median(means, axis=0)) < half_extent).all(axis=1)
         for name in ("means", "scales", "quats", "opacities", "sh0", "shN"):
             attr = f"gaussian_{name}"
@@ -404,6 +457,12 @@ class Trainer:
         torch.cuda.reset_peak_memory_stats(self.device)
         coord = batch["means"].to(self.device, non_blocking=True)
         feat = batch["colors"].to(self.device, non_blocking=True)
+        camtoworlds = batch["camtoworld"].to(self.device, non_blocking=True)  # [B, 4, 4]
+        # Random similarity transform of points + cameras (identity if
+        # `augment.enabled` is False); renders are unchanged, so the targets are.
+        coord, camtoworlds, grid_coord = augment(
+            self.cfg.augment, coord, camtoworlds, self.cfg.trainer.point_grid_size
+        )
         offset = torch.tensor([coord.shape[0]], device=self.device)
         point = Point(
             coord=coord,
@@ -411,6 +470,8 @@ class Trainer:
             grid_size=self.cfg.trainer.point_grid_size,
             offset=offset,
         )
+        if grid_coord is not None:
+            point["grid_coord"] = grid_coord
 
         # Predict raw GS params for every Gaussian once, with activations as in
         # `simple_trainer.py`'s `rasterize_splats`.
@@ -424,7 +485,6 @@ class Trainer:
         scales = torch.exp(leaves["scales"])
         opacities = torch.sigmoid(leaves["opacities"])
 
-        camtoworlds = batch["camtoworld"].to(self.device, non_blocking=True)  # [B, 4, 4]
         Ks = batch["K"].to(self.device, non_blocking=True)                    # [B, 3, 3]
         pixels = batch["image"].to(self.device, non_blocking=True) / 255.0    # [B, H, W, 3]
         num_views, height, width = pixels.shape[:3]
@@ -438,7 +498,19 @@ class Trainer:
         )
         image = None
 
-        loss_sum = l1_sum = ssim_sum = mse_sum = 0.0
+        # Regularizers, once per step (not per view), as in `simple_trainer.py`.
+        # Backpropagated into the leaves first, keeping the activation graph for
+        # the per-view render losses below.
+        reg = torch.zeros((), device=self.device)
+        if self.cfg.trainer.opacity_reg > 0.0:
+            reg = reg + self.cfg.trainer.opacity_reg * opacities.mean()
+        if self.cfg.trainer.scale_reg > 0.0:
+            reg = reg + self.cfg.trainer.scale_reg * scales.mean()
+        if reg.requires_grad:
+            reg.backward(retain_graph=True)
+
+        loss_sum = reg.item()
+        l1_sum = ssim_sum = mse_sum = 0.0
         for i in range(num_views):
             render, alpha, _ = rasterization(
                 means=coord,
@@ -497,7 +569,16 @@ class Trainer:
             "lr": lr,
             "grad_norm": grad_norm,
             "sh_degree": sh_degree,
+            "reg": reg.item(),
+            # Mean / max activated scale and mean opacity, to watch for
+            # oversized Gaussians.
+            "scale_mean": scales.detach().mean().item(),
+            "scale_max": scales.detach().max().item(),
+            "opacity_mean": opacities.detach().mean().item(),
             "mem_gib": torch.cuda.max_memory_allocated(self.device) / 2**30,
+            # Peak held by the caching allocator (allocated + cached blocks); the
+            # number to compare against the card's capacity.
+            "mem_reserved_gib": torch.cuda.max_memory_reserved(self.device) / 2**30,
         }
         if image is not None:
             metrics["image"] = image
@@ -515,7 +596,8 @@ class Trainer:
             grid_size=self.cfg.trainer.point_grid_size,
             offset=torch.tensor([coord.shape[0]], device=self.device),
         )
-        splats = self.model(point)
+        with bn_batch_stats(self.model, self.cfg.trainer.eval_bn_batch_stats):
+            splats = self.model(point)
         splats = {
             "means": coord,
             "quats": splats["quats"],
@@ -609,7 +691,7 @@ class Trainer:
         if step % self.cfg.trainer.log_train_steps == 0:
             print(f"[step {step}] { {k: v for k, v in metrics.items() if k != 'image'} }")
             self.logger.log(
-                {"step": step, **{f"train/{k}": metrics[k] for k in ("loss", "l1", "ssim", "psnr", "lr")}}
+                {"step": step, **{f"train/{k}": metrics[k] for k in ("loss", "l1", "ssim", "psnr", "lr", "reg", "scale_mean", "scale_max", "opacity_mean", "mem_gib", "mem_reserved_gib")}}
             )
         if "image" in metrics:
             self.logger.log(
@@ -651,7 +733,10 @@ class Trainer:
 
         # The Gaussian set (outlier filter) and the model input depend on these;
         # resuming with different values would silently train on something else.
-        saved = ckpt["config"]
+        # Fill fields added since the checkpoint was saved with their defaults,
+        # so older checkpoints still resume.
+        defaults = OmegaConf.structured(OmegaConf.get_type(self.cfg))
+        saved = OmegaConf.to_container(OmegaConf.merge(defaults, ckpt["config"]), resolve=True)
         current = OmegaConf.to_container(self.cfg, resolve=True)
         for section, key in (
             ("trainer", "point_grid_size"),

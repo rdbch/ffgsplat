@@ -729,6 +729,7 @@ class LitePT(PointModule):
         pre_norm=True,
         shuffle_orders=True,
         enc_mode=False,
+        norm="batch",
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
@@ -752,7 +753,15 @@ class LitePT(PointModule):
         assert self.enc_mode or self.num_stages == len(dec_patch_size) + 1
 
         # norm layers
-        bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)
+        # `norm` picks the stem / pooling / unpooling norm ("batch": LitePT's
+        # BatchNorm; "layer": per-point LayerNorm, no batch statistics, so
+        # train and eval mode behave the same). Blocks always use LayerNorm.
+        if norm == "batch":
+            bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)
+        elif norm == "layer":
+            bn_layer = nn.LayerNorm
+        else:
+            raise ValueError(f"Unknown norm {norm!r}, expected 'batch' or 'layer'")
         ln_layer = nn.LayerNorm
 
         # activation layers

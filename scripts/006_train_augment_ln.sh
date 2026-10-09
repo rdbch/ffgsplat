@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Same as 005_train_augment_nomirror.sh (augmentation without x-mirror, SH
+# degree 2 raised every 2k steps, MCMC opacity/scale regularizers), but with
+# LayerNorm instead of BatchNorm in LitePT's stem / pooling / unpooling
+# (MODEL_NORM=layer). No running statistics, so eval matches training under
+# augmentation without EVAL_BN_BATCH_STATS. Fresh run: 004/005 (BatchNorm)
+# checkpoints can't be loaded with this model.
+#
+# Augmentation (data/augment.py): a random rotation (mostly about z) + uniform
+# scale of points and cameras each step, and a random sub-voxel shift of
+# LitePT's grid. Eval is unaugmented.
+#
 # Launch core/train.py. Run as `python -m core.train` from the repo root so
 # `core`, `configs` and `data` all resolve as top-level packages (see
 # core/train.py's imports).
@@ -23,10 +34,20 @@ NUM_WORKERS=4
 
 # ---- model -----------------------------------------------------------------
 POINT_GRID_SIZE=0.005        # LitePT voxel size, in normalized scene units
-SH_DEGREE=3
+MODEL_NORM=layer             # stem/pool/unpool norm: batch (LitePT default) | layer (no running stats)
+SH_DEGREE=2
 INIT_SCALE=0.01              # starting (post-activation) scale of every Gaussian
 INIT_OPACITY=0.1
 MAX_SCALE=1.0                # upper bound on predicted scales
+
+# ---- augmentation ----------------------------------------------------------
+AUGMENT=true
+AUG_Z_ROT_DEG=180            # rotation about up (z), uniform in [-x, x]
+AUG_TILT_DEG=5               # rotation about x and y, each uniform in [-x, x]
+AUG_SCALE_MIN=0.8            # uniform scale, log-uniform in [min, max]
+AUG_SCALE_MAX=1.25
+AUG_VOXEL_JITTER=true        # random sub-voxel offset of the LitePT grid
+AUG_MIRROR_PROB=0.0          # no mirroring (ablation of 004)
 
 # ---- optimization / loss ---------------------------------------------------
 LR=2e-3                      # peak LR (AdamW), reached at the end of warmup
@@ -37,8 +58,11 @@ FINAL_LR_RATIO=0.01          # cosine decay ends at this fraction of LR
 GRAD_CLIP=1.0                # max grad norm; 0 disables
 NUM_STEPS=20000
 SSIM_LAMBDA=0.2
-SH_DEGREE_INTERVAL=1000      # raise the rendered SH degree every this many steps
+OPACITY_REG=0.01             # MCMC's mean-opacity penalty (gsplat MCMC preset: 0.01); 0 disables
+SCALE_REG=0.01               # MCMC's mean-scale penalty (gsplat MCMC preset: 0.01); 0 disables
+SH_DEGREE_INTERVAL=2000      # raise the rendered SH degree every this many steps
 RANDOM_BKGD=true             # random background in training (eval is always black)
+EVAL_BN_BATCH_STATS=false    # no-op with MODEL_NORM=layer (no BatchNorm left)
 
 # ---- eval / logging / checkpoints ------------------------------------------
 EVAL_EVERY=1000
@@ -48,7 +72,7 @@ LOG_TRAIN_IMAGES_STEPS=50
 LOG_EVAL_IMAGES=8            # first N eval views logged as images; -1 = all
 SAVE_EVERY=1000
 
-RUN_NAME="${SCENE}_gs${POINT_GRID_SIZE}_lr${LR}2"
+RUN_NAME="${SCENE}_gs${POINT_GRID_SIZE}_lr${LR}_aug_nomirror_ln"
 OUTPUT_DIR="results/$RUN_NAME"
 RESUME=""                    # path to <output_dir>/ckpts/step_*.pt to resume from
 
@@ -56,6 +80,7 @@ WANDB_PROJECT=ffgsplat
 WANDB_MODE=online            # online | offline | disabled
 
 DEVICE=cuda
+CUDA_MEMORY_FRACTION=0.9     # cap GPU memory share so WSL2 never spills to system RAM
 
 ARGS=(
     "data.parser.data_dir=$DATA_DIR"
@@ -67,10 +92,20 @@ ARGS=(
     "data.eval_batch_size=$EVAL_BATCH_SIZE"
     "data.eval_num_workers=$NUM_WORKERS"
 
+    "model.norm=$MODEL_NORM"
+
     "head.sh_degree=$SH_DEGREE"
     "head.init_scale=$INIT_SCALE"
     "head.init_opacity=$INIT_OPACITY"
     "head.max_scale=$MAX_SCALE"
+
+    "augment.enabled=$AUGMENT"
+    "augment.z_rot_deg=$AUG_Z_ROT_DEG"
+    "augment.tilt_deg=$AUG_TILT_DEG"
+    "augment.scale_min=$AUG_SCALE_MIN"
+    "augment.scale_max=$AUG_SCALE_MAX"
+    "augment.voxel_jitter=$AUG_VOXEL_JITTER"
+    "augment.mirror_prob=$AUG_MIRROR_PROB"
 
     "optimizer.lr=$LR"
     "optimizer.weight_decay=$WEIGHT_DECAY"
@@ -80,11 +115,15 @@ ARGS=(
     "optimizer.grad_clip=$GRAD_CLIP"
 
     "trainer.device=$DEVICE"
+    "trainer.cuda_memory_fraction=$CUDA_MEMORY_FRACTION"
     "trainer.num_steps=$NUM_STEPS"
     "trainer.point_grid_size=$POINT_GRID_SIZE"
     "trainer.ssim_lambda=$SSIM_LAMBDA"
+    "trainer.opacity_reg=$OPACITY_REG"
+    "trainer.scale_reg=$SCALE_REG"
     "trainer.sh_degree_interval=$SH_DEGREE_INTERVAL"
     "trainer.random_bkgd=$RANDOM_BKGD"
+    "trainer.eval_bn_batch_stats=$EVAL_BN_BATCH_STATS"
     "trainer.eval_every=$EVAL_EVERY"
     "trainer.lpips_net=$LPIPS_NET"
     "trainer.log_train_steps=$LOG_TRAIN_STEPS"

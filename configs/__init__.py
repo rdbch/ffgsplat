@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 
+from data.augment import AugmentConfig
 from core.trainer import DataConfig, HeadConfig, ModelConfig, TrainerConfig, WandbConfig
 
 
@@ -29,3 +30,5 @@ class Config:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
+    # Train-time scene augmentation; disabled by default (single-scene overfit).
+    augment: AugmentConfig = field(default_factory=AugmentConfig)
