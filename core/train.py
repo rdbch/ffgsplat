@@ -18,7 +18,7 @@ def main():
     trainer.build_logger()
 
     trainer.train()
-    trainer.logger.finish()
+    trainer.cleanup()
 
 
 if __name__ == "__main__":

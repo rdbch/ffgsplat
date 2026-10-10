@@ -52,6 +52,11 @@ class LitePtGSModel(nn.Module):
         bias[7] = math.log(init_opacity / (1.0 - init_opacity))
         with torch.no_grad():
             self.head.bias.copy_(bias)
+            # `shN` exactly zero until trained: rendered below its degree it
+            # gets no gradient and stays zero, so raising the SH degree mid-run
+            # starts from the current render instead of from random-weight
+            # outputs on the trained features (which made the loss jump).
+            self.head.weight[sum(self.split[:4]):].zero_()
 
     def forward(self, point: Point) -> Dict[str, torch.Tensor]:
         feat = self.head(self.backbone(point).feat)

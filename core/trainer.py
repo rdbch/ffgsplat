@@ -1,6 +1,8 @@
+import os
 import sys
 import math
 import contextlib
+from datetime import timedelta
 import random
 import torch
 import numpy as np
@@ -10,13 +12,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 from fused_ssim import fused_ssim
 from gsplat.rendering import rasterization
 from omegaconf import MISSING, OmegaConf
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from torchmetrics.image import (
     LearnedPerceptualImagePatchSimilarity,
     PeakSignalNoiseRatio,
@@ -68,7 +71,7 @@ def _collate_camera_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         values = [item[key] for item in batch]
         if key in ("K", "camtoworld", "image"):
             out[key] = torch.stack(values, dim=0)
-        elif key == "image_id":
+        elif key in ("image_id", "scene"):
             out[key] = torch.tensor(values)
         else:
             out[key] = values
@@ -95,6 +98,65 @@ def bn_batch_stats(model: nn.Module, enabled: bool = True):
             m.num_batches_tracked.copy_(tracked)
 
 
+class _MultiSceneDataset(torch.utils.data.Dataset):
+    """Views of several scenes, indexed by `(scene, view)` pairs (from
+    `_RandomSceneBatchSampler`); each item is tagged with its `scene` index."""
+
+    def __init__(self, datasets):
+        self.datasets = datasets
+
+    def __len__(self):
+        return sum(len(d) for d in self.datasets)
+
+    def __getitem__(self, key):
+        scene, index = key
+        item = self.datasets[scene][index]
+        item["scene"] = scene
+        return item
+
+
+class _RandomSceneBatchSampler(torch.utils.data.Sampler):
+    """Endless batches of `batch_size` views of one scene, picked uniformly at
+    random each batch (so each rank renders a random scene each step). Views
+    come from a per-scene shuffled order, reshuffled when used up. Draws from
+    torch's default RNG, which is seeded per rank."""
+
+    def __init__(self, sizes, batch_size):
+        self.sizes = list(sizes)
+        self.batch_size = batch_size
+
+    def __iter__(self):
+        orders = [torch.randperm(n).tolist() for n in self.sizes]
+        pos = [0] * len(self.sizes)
+        while True:
+            scene = int(torch.randint(len(self.sizes), ()))
+            batch = []
+            while len(batch) < self.batch_size:
+                if pos[scene] == len(orders[scene]):
+                    orders[scene] = torch.randperm(self.sizes[scene]).tolist()
+                    pos[scene] = 0
+                take = orders[scene][pos[scene] : pos[scene] + self.batch_size - len(batch)]
+                pos[scene] += len(take)
+                batch.extend((scene, i) for i in take)
+            yield batch
+
+
+@dataclass
+class Scene:
+    """One scene's data: parser, datasets, eval loader and the reference
+    Gaussians' `means` / base RGB `colors` (the model's fixed input, pinned on
+    CPU and attached to every batch from the main process, so the full cloud
+    isn't shipped through the loader workers every item)."""
+
+    name: str
+    parser: Parser
+    train_dataset: Dataset
+    eval_dataset: Dataset
+    eval_loader: DataLoader
+    means: torch.Tensor
+    colors: torch.Tensor
+
+
 @dataclass
 class DataConfig:
     """Config for `Trainer`'s data pipeline: the scene parser plus train/eval
@@ -102,6 +164,16 @@ class DataConfig:
     prefixed fields rather than separate per-split sub-configs."""
 
     parser: ParserConfig = field(default_factory=lambda: ParserConfig(data_dir=MISSING))
+
+    # Multi-scene training: scene names under `scene_root`, each with its
+    # reference checkpoint at `gaussian_ckpt_template.format(scene=name)`; all
+    # other parser settings come from `parser` (whose `data_dir` and
+    # `gaussian_ckpt_path` are then unused). Each training batch is
+    # `train_batch_size` views of one random scene. Every scene is evaluated
+    # on its own val split. Empty = single scene from `parser`.
+    scenes: List[str] = field(default_factory=list)
+    scene_root: Optional[str] = None
+    gaussian_ckpt_template: Optional[str] = None
 
     train_patch_size: Optional[int] = None
     train_load_depths: bool = False
@@ -295,6 +367,10 @@ class TrainerConfig:
     # predicted scales at eval. No-op for `model.norm="layer"`.
     eval_bn_batch_stats: bool = False
     sh_degree_interval: int = 1000
+    # Process-group backend for multi-GPU data parallel (launched with
+    # `torchrun`; ignored otherwise). NCCL works between MIG slices on
+    # compute1 (no P2P, ~2.5 ms per 64 MB all-reduce); "gloo" is the fallback.
+    dist_backend: str = "nccl"
     near_plane: float = 0.01
     far_plane: float = 1e10
 
@@ -303,27 +379,51 @@ class Trainer:
     def __init__(self, cfg):
         self.cfg = cfg
 
+        # Data parallel when launched with `torchrun` (which sets WORLD_SIZE /
+        # RANK): every rank renders its own `train_batch_size` views of its own
+        # augmented cloud and gradients are averaged, so the effective batch is
+        # `world_size * train_batch_size` views. Each rank must see exactly one
+        # GPU (CUDA enumerates only one MIG slice per process), hence `cuda`.
+        # Without torchrun this is a single process and every `dist` call is
+        # skipped.
+        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+        self.rank = int(os.environ.get("RANK", 0))
+        self.is_main = self.rank == 0
+
         self.device = torch.device(cfg.trainer.device if torch.cuda.is_available() else "cpu")
         if self.device.type == "cuda" and cfg.trainer.cuda_memory_fraction is not None:
             index = self.device.index if self.device.index is not None else torch.cuda.current_device()
             torch.cuda.set_per_process_memory_fraction(cfg.trainer.cuda_memory_fraction, index)
+        if self.world_size > 1:
+            if self.device.type == "cuda":
+                # `cuda` has no index; each rank sees one GPU, so this is cuda:0.
+                self.device = torch.device("cuda", torch.cuda.current_device())
+                torch.cuda.set_device(self.device)
+            # Long timeout: the other ranks wait in a barrier while rank 0
+            # evaluates and saves.
+            dist.init_process_group(
+                backend=cfg.trainer.dist_backend,
+                timeout=timedelta(hours=1),
+                device_id=self.device if self.device.type == "cuda" and cfg.trainer.dist_backend == "nccl" else None,
+            )
+            # torch's default seed is the same in every process, so without
+            # this all ranks would draw identical augmentations / backgrounds.
+            # Rank 0 keeps the default, matching single-process runs.
+            if self.rank > 0:
+                torch.manual_seed(torch.initial_seed() + self.rank)
+            print(f"Rank {self.rank}/{self.world_size} on {self.device} ({cfg.trainer.dist_backend})")
 
         self.model = None
+        self.train_sampler = None
         self.optimizer = None
         self.scheduler = None
         self.criterion = nn.MSELoss()
         self.logger = None
 
-        self.parser = None
-        self.train_dataset = None
-        self.eval_dataset = None
+        # One `Scene` per scene (a single one unless `data.scenes` is set).
+        self.scenes: List[Scene] = []
+        self.multi_scene = bool(cfg.data.scenes)
         self.train_loader = None
-        self.eval_loader = None
-        # Pinned CPU copies of the reference Gaussians' `means` (the model's fixed
-        # input coordinates) and their base RGB colors (the input features),
-        # attached to every batch in `train()`.
-        self.means = None
-        self.colors = None
 
         self.step = 0
         self.start_step = 0
@@ -339,6 +439,10 @@ class Trainer:
             init_opacity=self.cfg.head.init_opacity,
             max_scale=self.cfg.head.max_scale,
         ).to(self.device)
+        # Start every rank from rank 0's weights.
+        if self.world_size > 1:
+            for t in itertools.chain(self.model.parameters(), self.model.buffers()):
+                self._broadcast(t)
 
     def build_optimizer(self):
         # The model's weights are the only trainable parameters; `means` are a
@@ -363,30 +467,61 @@ class Trainer:
 
     def build_dataloaders(self):
         data_cfg = self.cfg.data
-        self.parser = Parser(data_cfg.parser)
+        if self.multi_scene:
+            if not data_cfg.scene_root or not data_cfg.gaussian_ckpt_template:
+                raise ValueError("data.scenes needs data.scene_root and data.gaussian_ckpt_template")
+            self.scenes = [
+                self._build_scene(name, OmegaConf.merge(data_cfg.parser, {
+                    "data_dir": str(Path(data_cfg.scene_root) / name),
+                    "gaussian_ckpt_path": data_cfg.gaussian_ckpt_template.format(scene=name),
+                }))
+                for name in data_cfg.scenes
+            ]
+            # A random scene per batch (per rank); endless, so no epochs.
+            self.train_loader = DataLoader(
+                _MultiSceneDataset([scene.train_dataset for scene in self.scenes]),
+                collate_fn=_collate_camera_batch,
+                batch_sampler=_RandomSceneBatchSampler(
+                    [len(scene.train_dataset) for scene in self.scenes], data_cfg.train_batch_size
+                ),
+                num_workers=data_cfg.train_num_workers,
+                pin_memory=data_cfg.train_pin_memory,
+            )
+            return
 
-        self.train_dataset = Dataset(self.parser, DatasetConfig(
+        scene = self._build_scene(Path(data_cfg.parser.data_dir).name, data_cfg.parser)
+        self.scenes = [scene]
+        # Each rank draws a disjoint shard of the views every epoch.
+        if self.world_size > 1:
+            self.train_sampler = DistributedSampler(
+                scene.train_dataset, shuffle=data_cfg.train_shuffle, drop_last=data_cfg.train_drop_last
+            )
+        self.train_loader = DataLoader(
+            scene.train_dataset,
+            collate_fn=_collate_camera_batch,
+            batch_size=data_cfg.train_batch_size,
+            num_workers=data_cfg.train_num_workers,
+            shuffle=data_cfg.train_shuffle if self.train_sampler is None else False,
+            sampler=self.train_sampler,
+            pin_memory=data_cfg.train_pin_memory,
+            drop_last=data_cfg.train_drop_last,
+        )
+
+    def _build_scene(self, name, parser_cfg):
+        data_cfg = self.cfg.data
+        parser = Parser(parser_cfg)
+        train_dataset = Dataset(parser, DatasetConfig(
             split="train",
             patch_size=data_cfg.train_patch_size,
             load_depths=data_cfg.train_load_depths,
         ))
-        self.eval_dataset = Dataset(self.parser, DatasetConfig(
+        eval_dataset = Dataset(parser, DatasetConfig(
             split="val",
             patch_size=data_cfg.eval_patch_size,
             load_depths=data_cfg.eval_load_depths,
         ))
-
-        self.train_loader = DataLoader(
-            self.train_dataset,
-            collate_fn=_collate_camera_batch,
-            batch_size=data_cfg.train_batch_size,
-            num_workers=data_cfg.train_num_workers,
-            shuffle=data_cfg.train_shuffle,
-            pin_memory=data_cfg.train_pin_memory,
-            drop_last=data_cfg.train_drop_last,
-        )
-        self.eval_loader = DataLoader(
-            self.eval_dataset,
+        eval_loader = DataLoader(
+            eval_dataset,
             collate_fn=_collate_camera_batch,
             batch_size=data_cfg.eval_batch_size,
             num_workers=data_cfg.eval_num_workers,
@@ -395,39 +530,36 @@ class Trainer:
             drop_last=data_cfg.eval_drop_last,
         )
 
-        # Attached per batch from the main process (not in `Dataset.__getitem__`)
-        # so the full cloud isn't shipped through the loader workers every item.
-        if self.parser.gaussian_means is None:
-            raise ValueError("data.parser.gaussian_ckpt_path must be set")
+        if parser.gaussian_means is None:
+            raise ValueError(f"{name}: data.parser.gaussian_ckpt_path must be set")
 
         # Drop far-away outlier Gaussians (MCMC puts a few up to ~9000 units out on bonsai)
         # so the voxelized cloud fits LitePT's serialization limit of 2^16 voxels
         # per axis (`Point.serialization`'s `depth <= 16` assert). All `gaussian_*`
         # arrays are filtered with the same mask to stay aligned.
-        means = self.parser.gaussian_means
+        means = parser.gaussian_means
         half_extent = (2**16 - 1) * self.cfg.trainer.point_grid_size / 2
         # Training augmentation can rotate/scale the cloud (and shift the grid
         # by up to a voxel), so leave room for its worst-case extent.
         if self.cfg.augment.enabled:
             half_extent = (half_extent - self.cfg.trainer.point_grid_size) / max_expansion(self.cfg.augment)
         keep = (np.abs(means - np.median(means, axis=0)) < half_extent).all(axis=1)
-        for name in ("means", "scales", "quats", "opacities", "sh0", "shN"):
-            attr = f"gaussian_{name}"
-            setattr(self.parser, attr, getattr(self.parser, attr)[keep])
-        print(f"Removed {(~keep).sum()} / {len(keep)} outlier Gaussians")
+        for attr_name in ("means", "scales", "quats", "opacities", "sh0", "shN"):
+            attr = f"gaussian_{attr_name}"
+            setattr(parser, attr, getattr(parser, attr)[keep])
+        print(f"[{name}] Removed {(~keep).sum()} / {len(keep)} outlier Gaussians")
 
-        self.means = torch.from_numpy(self.parser.gaussian_means).float()
+        means = torch.from_numpy(parser.gaussian_means).float()
         # Degree-0 SH to RGB: `sh0 * C0 + 0.5`, with C0 the l=0 SH basis constant.
-        sh0 = torch.from_numpy(self.parser.gaussian_sh0).float()[:, 0, :]
-        self.colors = (sh0 * 0.28209479177387814 + 0.5).clamp(0.0, 1.0)
+        sh0 = torch.from_numpy(parser.gaussian_sh0).float()[:, 0, :]
+        colors = (sh0 * 0.28209479177387814 + 0.5).clamp(0.0, 1.0)
         if self.device.type == "cuda":
-            self.means = self.means.pin_memory()
-            self.colors = self.colors.pin_memory()
+            means = means.pin_memory()
+            colors = colors.pin_memory()
+        return Scene(name, parser, train_dataset, eval_dataset, eval_loader, means, colors)
 
     def train(self):
-        # Re-iterate the loader each epoch (reshuffles). `itertools.cycle` would
-        # cache every batch of the first epoch in RAM and replay them unshuffled.
-        train_iter = (batch for _ in itertools.count() for batch in self.train_loader)
+        train_iter = self._train_batches()
         self.model.train()
 
         # Eval metrics, set up as in `simple_trainer.py` so numbers are comparable
@@ -440,18 +572,32 @@ class Trainer:
         num_steps = self.cfg.trainer.num_steps
         for self.step in range(self.start_step, num_steps):
             batch = next(train_iter)
-            batch["means"] = self.means
-            batch["colors"] = self.colors
+            scene = self.scenes[int(batch["scene"][0])] if "scene" in batch else self.scenes[0]
+            batch["means"] = scene.means
+            batch["colors"] = scene.colors
             metrics = self.train_step(batch)
             self.log(metrics, self.step)
 
+            # Eval split by scene over the ranks (a single scene: rank 0 only);
+            # checkpoints on rank 0 only. The others wait.
             if (self.step + 1) % self.cfg.trainer.eval_every == 0 or self.step == num_steps - 1:
                 self.model.eval()
                 self.eval()
                 self.model.train()
+                self._barrier()
 
             if (self.step + 1) % self.cfg.trainer.save_every == 0 or self.step == num_steps - 1:
-                self.save_checkpoint()
+                if self.is_main:
+                    self.save_checkpoint()
+                self._barrier()
+
+    def _train_batches(self):
+        # Re-iterate the loader each epoch (reshuffles). `itertools.cycle` would
+        # cache every batch of the first epoch in RAM and replay them unshuffled.
+        for epoch in itertools.count():
+            if self.train_sampler is not None:
+                self.train_sampler.set_epoch(epoch)
+            yield from self.train_loader
 
     def train_step(self, batch):
         torch.cuda.reset_peak_memory_stats(self.device)
@@ -551,6 +697,12 @@ class Trainer:
         torch.autograd.backward(
             list(splats.values()), [leaves[k].grad for k in splats]
         )
+        if self.world_size > 1:
+            # Average over ranks before clipping, so the clip and the update
+            # see the full batch's gradient.
+            self._all_reduce_grads()
+            # Batch means over all ranks, for logging.
+            l1_sum, ssim_sum, mse_sum, loss_sum = self._all_reduce_mean([l1_sum, ssim_sum, mse_sum, loss_sum])
         if self.cfg.optimizer.grad_clip > 0:
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), self.cfg.optimizer.grad_clip
@@ -582,17 +734,60 @@ class Trainer:
         }
         if image is not None:
             metrics["image"] = image
+            metrics["image_scene"] = self.scenes[int(batch["scene"][0])].name if self.multi_scene else None
         return metrics
 
     @torch.no_grad()
     def eval(self):
-        """Render every eval view and log mean PSNR/SSIM/LPIPS vs. ground truth."""
+        """Render every eval view of every scene and log mean PSNR/SSIM/LPIPS vs.
+        ground truth. Scene `i` is evaluated on rank `i % world_size`; results
+        are gathered on rank 0. Call on every rank."""
+        results = {
+            scene.name: self.eval_scene(scene)
+            for i, scene in enumerate(self.scenes)
+            if i % self.world_size == self.rank
+        }
+        if self.world_size > 1:
+            gathered = [None] * self.world_size if self.is_main else None
+            dist.gather_object(results, gathered, dst=0)
+            if not self.is_main:
+                return
+            results = {k: v for r in gathered for k, v in r.items()}
+
+        log = {"step": self.step}
+        for scene in self.scenes:
+            metrics = results[scene.name]
+            images = metrics.pop("images")
+            stats = {k: sum(v) / len(v) for k, v in metrics.items()}
+            print(
+                f"[eval step {self.step}]{f' {scene.name}' if self.multi_scene else ''} "
+                f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, "
+                f"LPIPS: {stats['lpips']:.3f} ({len(metrics['psnr'])} images)"
+            )
+            # Single scene: `eval/<metric>` as before; multi-scene:
+            # `eval/<scene>/<metric>`, plus their mean over scenes below.
+            prefix = f"eval/{scene.name}/" if self.multi_scene else "eval/"
+            log.update({f"{prefix}{k}": v for k, v in stats.items()})
+            log[f"{prefix}images"] = [wandb.Image(image, caption=caption) for image, caption in images]
+        if self.multi_scene:
+            for k in ("psnr", "ssim", "lpips"):
+                log[f"eval/{k}"] = sum(log[f"eval/{scene.name}/{k}"] for scene in self.scenes) / len(self.scenes)
+            print(
+                f"[eval step {self.step}] mean over {len(self.scenes)} scenes: PSNR: {log['eval/psnr']:.3f}, "
+                f"SSIM: {log['eval/ssim']:.4f}, LPIPS: {log['eval/lpips']:.3f}"
+            )
+        self.logger.log(log)
+
+    @torch.no_grad()
+    def eval_scene(self, scene):
+        """Per-image PSNR/SSIM/LPIPS lists (and logged images) over `scene`'s
+        eval split."""
         # The model's weights are fixed during eval, so predict the Gaussians once
         # for the whole eval split.
-        coord = self.means.to(self.device, non_blocking=True)
+        coord = scene.means.to(self.device, non_blocking=True)
         point = Point(
             coord=coord,
-            feat=self.colors.to(self.device, non_blocking=True),
+            feat=scene.colors.to(self.device, non_blocking=True),
             grid_size=self.cfg.trainer.point_grid_size,
             offset=torch.tensor([coord.shape[0]], device=self.device),
         )
@@ -607,21 +802,10 @@ class Trainer:
         }
 
         metrics = {"psnr": [], "ssim": [], "lpips": [], "images": []}
-        for batch in self.eval_loader:
+        for batch in scene.eval_loader:
             for k, v in self.eval_step(batch, splats).items():
                 metrics[k].extend(v)
-        images = metrics.pop("images")
-        stats = {k: sum(v) / len(v) for k, v in metrics.items()}
-
-        print(
-            f"[eval step {self.step}] PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, "
-            f"LPIPS: {stats['lpips']:.3f} ({len(metrics['psnr'])} images)"
-        )
-        self.logger.log({
-            "step": self.step,
-            **{f"eval/{k}": v for k, v in stats.items()},
-            "eval/images": [wandb.Image(image, caption=caption) for image, caption in images],
-        })
+        return metrics
 
     @torch.no_grad()
     def eval_step(self, batch, splats):
@@ -668,13 +852,16 @@ class Trainer:
         return metrics
 
     def build_logger(self):
+        # Only rank 0 logs.
+        if not self.is_main:
+            return
         wandb_cfg = self.cfg.wandb
         self.logger = wandb.init(
             project=wandb_cfg.project,
             entity=wandb_cfg.entity,
             name=wandb_cfg.name,
             mode=wandb_cfg.mode,
-            config=OmegaConf.to_container(self.cfg, resolve=True),
+            config={**OmegaConf.to_container(self.cfg, resolve=True), "world_size": self.world_size},
             id=self.wandb_run_id,
             resume="allow" if self.wandb_run_id else None,
         )
@@ -687,16 +874,17 @@ class Trainer:
         self.logger.define_metric("eval/*", step_metric="step")
 
     def log(self, metrics, step):
+        if not self.is_main:
+            return
         # `train/` prefix groups these into one "train" panel section in wandb.
         if step % self.cfg.trainer.log_train_steps == 0:
-            print(f"[step {step}] { {k: v for k, v in metrics.items() if k != 'image'} }")
+            print(f"[step {step}] { {k: v for k, v in metrics.items() if k not in ('image', 'image_scene')} }")
             self.logger.log(
                 {"step": step, **{f"train/{k}": metrics[k] for k in ("loss", "l1", "ssim", "psnr", "lr", "reg", "scale_mean", "scale_max", "opacity_mean", "mem_gib", "mem_reserved_gib")}}
             )
         if "image" in metrics:
-            self.logger.log(
-                {"step": step, "train/image": wandb.Image(metrics["image"], caption="GT | render")}
-            )
+            caption = f"{metrics['image_scene']} | GT | render" if metrics.get("image_scene") else "GT | render"
+            self.logger.log({"step": step, "train/image": wandb.Image(metrics["image"], caption=caption)})
 
     def save_checkpoint(self):
         """Save the full training state (to resume) and, separately, the model
@@ -741,6 +929,9 @@ class Trainer:
         for section, key in (
             ("trainer", "point_grid_size"),
             ("data", "parser"),
+            ("data", "scenes"),
+            ("data", "scene_root"),
+            ("data", "gaussian_ckpt_template"),
             ("model", None),
             ("head", None),
             # The LR schedule is laid out over `num_steps` with these settings.
@@ -770,12 +961,58 @@ class Trainer:
                 self.scheduler.step()
         self.wandb_run_id = ckpt["wandb_run_id"]
 
-        rng = ckpt["rng"]
-        torch.set_rng_state(rng["torch"])
-        torch.cuda.set_rng_state_all(rng["cuda"])
-        np.random.set_state(rng["numpy"])
-        random.setstate(rng["python"])
+        # The saved RNG state is rank 0's; the other ranks keep their own
+        # (per-rank seeded) streams so their augmentations stay distinct.
+        if self.is_main:
+            rng = ckpt["rng"]
+            torch.set_rng_state(rng["torch"])
+            torch.cuda.set_rng_state_all(rng["cuda"])
+            np.random.set_state(rng["numpy"])
+            random.setstate(rng["python"])
         print(f"Resumed from {path} at step {self.start_step}")
+
+    # ---- data parallel helpers (no-ops / unused with a single process) --------
+
+    def _comm_tensor(self, t):
+        # Gloo is run on CPU copies; NCCL works on the GPU tensors directly.
+        return t if self.cfg.trainer.dist_backend == "nccl" else t.cpu()
+
+    def _broadcast(self, t):
+        buf = self._comm_tensor(t.data)
+        dist.broadcast(buf, src=0)
+        if buf is not t.data:
+            t.data.copy_(buf)
+
+    def _all_reduce_grads(self):
+        # One flat all-reduce for all gradients. Missing grads become zeros so
+        # every rank sends a buffer of the same layout.
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        for p in params:
+            if p.grad is None:
+                p.grad = torch.zeros_like(p)
+        flat = self._comm_tensor(torch.cat([p.grad.reshape(-1) for p in params]))
+        dist.all_reduce(flat)
+        flat = flat.to(self.device) / self.world_size
+        offset = 0
+        for p in params:
+            n = p.grad.numel()
+            p.grad.copy_(flat[offset : offset + n].view_as(p.grad))
+            offset += n
+
+    def _all_reduce_mean(self, values):
+        buf = self._comm_tensor(torch.tensor(values, dtype=torch.float64, device=self.device))
+        dist.all_reduce(buf)
+        return (buf / self.world_size).tolist()
+
+    def _barrier(self):
+        if self.world_size > 1:
+            dist.barrier()
+
+    def cleanup(self):
+        if self.logger is not None:
+            self.logger.finish()
+        if self.world_size > 1:
+            dist.destroy_process_group()
 
     def _to_device(self, batch):
         return [b.to(self.device) for b in batch]
