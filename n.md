@@ -121,3 +121,30 @@ No density control (split/prune/relocate) in the first version — point count i
 4. **Visibility research spike.** Inspect `gsplat.rendering.rasterization()`'s actual outputs/autograd behavior for per-Gaussian contribution, resolving the Supervision open question.
 5. **Full multi-view, single-scene run.** Compare PSNR/SSIM/LPIPS and wall-clock training time against the existing MCMC baseline at matched Gaussian count.
 6. **(Stretch) Multi-scene training** for generalization, and backbone upgrade (point-transformer / sparse conv) if the per-point MLP underperforms.
+
+## EDGS points + per-point RoMa features (tools)
+
+Input points from EDGS (RoMa matching + triangulation) instead of MCMC means, each with
+image features sampled at the pixel it was triangulated from (reference view only).
+
+- **Extraction:** `submodules/EDGS/edgs_extract_ref.py` (EDGS init + ref-view features),
+  `submodules/EDGS/edgs_fit_pca.py` (one global PCA basis per block, fitted on the training
+  views of all 7 Mip-NeRF 360 scenes). Jobs: `$WORK/jobs/edgs_fit_pca.slurm`,
+  `$WORK/jobs/edgs_extract_ref_mipnerf.slurm`.
+- **Features (104-d, fp16):** RoMa's VGG19 relu1_2 → 8, relu2_2 → 16, relu3_4 → 32 dims and
+  its DINOv2 ViT-L/14 tokens → 48 dims; L2-normalized per block, then PCA. RoMa runs at
+  560×560.
+- **Output per scene:** `$WORK/experiments/edgs_feat/<scene>/`: `point_cloud/iteration_0/point_cloud.ply`,
+  `features.npz` (`feat`, `ref_cam`, `ref_uv`, `valid`; row i = PLY row i),
+  `features_meta.json` (block column spans, camera names, settings). Columns are in
+  alphabetical block order (`roma1`, `roma16`, `roma2`, `roma4`): slice by `meta["blocks"]`.
+  Basis: `$WORK/experiments/edgs_feat/pca/mipnerf7_basis.{npz,json}`.
+- **Viewer:** `$WORK/viewers/edgs_features/` (Spark.js). Shows each block as a per-scene
+  PCA → RGB colouring, with keys 1-5 for the blocks and C for a screenshot to the clipboard.
+  How to serve and open it: [`$WORK/viewers/edgs_features/README.md`](/projects/hpc/radub/viewers/edgs_features/README.md).
+- **Training on EDGS points:** `input.source=edgs` (config section `input`, `data/edgs_points.py`;
+  default `mcmc` keeps 003-008 unchanged). `scripts/009_train_edgs_augment_ln.sh` / `$WORK/jobs/ffgsplat_009.slurm`:
+  bonsai, 1M random valid EDGS points (= MCMC cap), `FEATURES=rgb` (default) or
+  `FEATURES=rgb,roma1,roma2,roma4,roma16` (104 dims, standardized per dim, Linear-GELU-Linear to 64,
+  concatenated with rgb -> 67 ch into LitePT). Startup checks: EDGS cameras == parser training views,
+  and points reproject onto their reference pixels (median <= 3 px) in the normalized frame.

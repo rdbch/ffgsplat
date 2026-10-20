@@ -8,7 +8,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import imageio.v2 as imageio
 import numpy as np
 from PIL import Image
+from collections import OrderedDict
+from types import SimpleNamespace
+
 from pycolmap import SceneManager
+from pycolmap.camera import Camera
+from pycolmap.image import Image
+from pycolmap.rotation import Quaternion
 from tqdm import tqdm
 from typing_extensions import assert_never
 
@@ -62,6 +68,10 @@ class ParserConfig:
     factor: int = 1
     normalize: bool = False
     test_every: int = 8
+    # Read the COLMAP model from `sparse/0/colmap.json` (scripts/018_colmap_to_json.py:
+    # cameras, poses, 3D points without tracks / 2D keypoints) instead of the binary
+    # files through pycolmap; same values, ~100x faster. `point_indices` stays empty.
+    colmap_json: bool = False
     gaussian_ckpt_path: Optional[str] = None
     """Path to a simple_trainer.py checkpoint (.pth) to load reference Gaussian
     parameters (means, scales, quats, opacities, sh0, shN) from."""
@@ -141,12 +151,45 @@ class Parser:
         if not os.path.exists(colmap_dir):
             colmap_dir = os.path.join(self.cfg.data_dir, "sparse")
         assert os.path.exists(colmap_dir), f"COLMAP directory {colmap_dir} does not exist."
+        if self.cfg.colmap_json:
+            return self._load_colmap_json(os.path.join(colmap_dir, "colmap.json"))
 
         manager = SceneManager(colmap_dir)
         manager.load_cameras()
         manager.load_images()
         manager.load_points3D()
         return manager
+
+    @staticmethod
+    def _load_colmap_json(path: str) -> SimpleNamespace:
+        """A stand-in for `SceneManager` with the attributes `Parser` reads, from
+        `scripts/018_colmap_to_json.py`'s output; cameras and images are pycolmap's
+        own classes, so poses / intrinsics come out exactly as from the .bin files."""
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} not found (data.parser.colmap_json=true); "
+                                    f"create it with scripts/018_colmap_to_json.py")
+        with open(path) as f:
+            model = json.load(f)
+        cameras = OrderedDict(
+            (int(camera_id), Camera(c["model_id"], c["width"], c["height"], tuple(c["params"])))
+            for camera_id, c in model["cameras"].items()
+        )
+        images = OrderedDict()
+        for im in model["images"]:
+            images[im["image_id"]] = Image(im["name"], im["camera_id"], Quaternion(np.array(im["qvec"])), np.array(im["tvec"]))
+        points = model["points3D"]
+        ids = np.array(points["ids"], dtype=np.uint64)
+        return SimpleNamespace(
+            cameras=cameras,
+            images=images,
+            name_to_image_id={im.name: image_id for image_id, im in images.items()},
+            points3D=np.array(points["xyz"], dtype=np.float64).reshape(-1, 3),
+            point3D_colors=np.array(points["rgb"], dtype=np.uint8).reshape(-1, 3),
+            point3D_errors=np.array(points["error"], dtype=np.float64),
+            point3D_id_to_point3D_idx={point_id: i for i, point_id in enumerate(ids)},
+            # No tracks: `_init_points3d` leaves `point_indices` empty.
+            point3D_id_to_images={},
+        )
 
     def _init_cameras_and_extrinsics(self, manager: SceneManager) -> None:
         """Extract extrinsics (world-to-camera) and per-camera intrinsics/distortion."""
@@ -239,6 +282,14 @@ class Parser:
             image_dir_suffix = ""
         colmap_image_dir = os.path.join(self.cfg.data_dir, "images")
         image_dir = os.path.join(self.cfg.data_dir, "images" + image_dir_suffix)
+        if self.cfg.factor > 1 and not os.path.exists(colmap_image_dir) and os.path.exists(image_dir):
+            # Only the downscaled images (DL3DV's gaussian_splat/images_4): they
+            # carry COLMAP's file names, so map by name; nothing to pair by order.
+            missing = [f for f in self.image_names if not os.path.exists(os.path.join(image_dir, f))]
+            if missing:
+                raise ValueError(f"{len(missing)} COLMAP images missing from {image_dir}, e.g. {missing[:3]}")
+            self.image_paths = [os.path.join(image_dir, f) for f in self.image_names]
+            return
         for d in [image_dir, colmap_image_dir]:
             if not os.path.exists(d):
                 raise ValueError(f"Image folder {d} does not exist.")

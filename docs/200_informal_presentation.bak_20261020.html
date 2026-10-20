@@ -1,0 +1,2085 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ffgsplat: Research Notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #fbfaf7;
+    --surface: #ffffff;
+    --text: #1d1d1f;
+    --muted: #6b6b70;
+    --rule: #e4e2dc;
+    --accent: #8c2f39;
+    --accent-soft: #f4e9ea;
+    --code-bg: #f1efea;
+    --good: #2f6f4f;
+    --bad: #a23b2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #151517;
+      --surface: #1d1d20;
+      --text: #e8e6e1;
+      --muted: #9a9a9f;
+      --rule: #2e2e32;
+      --accent: #e08a93;
+      --accent-soft: #2c1e20;
+      --code-bg: #26262a;
+      --good: #7cc4a0;
+      --bad: #f08f7c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #151517;
+    --surface: #1d1d20;
+    --text: #e8e6e1;
+    --muted: #9a9a9f;
+    --rule: #2e2e32;
+    --accent: #e08a93;
+    --accent-soft: #2c1e20;
+    --code-bg: #26262a;
+    --good: #7cc4a0;
+    --bad: #f08f7c;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 17px/1.65 "Source Serif 4", Georgia, serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 16px; }
+
+  header.hero {
+    text-align: center;
+    padding: 72px 0 40px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .hero h1 {
+    font-size: clamp(2rem, 5vw, 2.8rem);
+    line-height: 1.15;
+    margin: 0 0 12px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .hero .subtitle { color: var(--muted); font-size: 1.1rem; margin: 0 auto; max-width: 640px; }
+  .hero .meta {
+    margin-top: 20px;
+    font: 500 0.85rem/1.4 Inter, system-ui, sans-serif;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+  }
+
+  nav.toc {
+    margin: 36px 0 8px;
+    padding: 20px 24px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    font-family: Inter, system-ui, sans-serif;
+    font-size: 0.92rem;
+  }
+  nav.toc h2 {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 0 0 10px; font-weight: 600;
+  }
+  nav.toc ol { margin: 0; padding-left: 1.4em; }
+  nav.toc li { margin: 4px 0; }
+  nav.toc a { color: var(--text); text-decoration: none; }
+  nav.toc a:hover { color: var(--accent); }
+  nav.toc .tag { margin-left: 6px; }
+
+  section.obs {
+    padding: 48px 0 8px;
+    border-bottom: 1px solid var(--rule);
+    scroll-margin-top: 16px;
+  }
+  section.obs:last-of-type { border-bottom: none; }
+  .obs .kicker {
+    font: 600 0.75rem/1 Inter, system-ui, sans-serif;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--accent);
+    margin-bottom: 10px;
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  }
+  .obs h2 {
+    font-size: 1.6rem; line-height: 1.25; margin: 0 0 6px; font-weight: 600;
+  }
+  .obs .date {
+    font: 400 0.85rem/1.4 Inter, system-ui, sans-serif; color: var(--muted);
+    margin-bottom: 20px;
+  }
+  .obs h3 {
+    font: 600 0.8rem/1.2 Inter, system-ui, sans-serif;
+    text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--muted); margin: 28px 0 8px;
+  }
+  .tag {
+    display: inline-block;
+    font: 500 0.72rem/1 Inter, system-ui, sans-serif;
+    padding: 4px 8px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent);
+    letter-spacing: 0.02em; text-transform: none;
+  }
+  .tag.grey { background: var(--code-bg); color: var(--muted); }
+
+  p { margin: 0 0 14px; }
+  ul { margin: 0 0 14px; padding-left: 1.3em; }
+  li { margin: 6px 0; }
+  li > ul { margin: 6px 0 0; }
+  code {
+    font: 0.84em "JetBrains Mono", ui-monospace, monospace;
+    background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+    overflow-wrap: anywhere;
+  }
+  strong { font-weight: 600; }
+
+  .table-wrap { overflow-x: auto; margin: 6px 0 18px; }
+  table {
+    border-collapse: collapse; width: 100%;
+    font: 0.86rem/1.4 Inter, system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+    background: var(--surface);
+  }
+  th, td { padding: 8px 12px; text-align: right; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { font-weight: 600; color: var(--muted); border-bottom: 2px solid var(--rule); }
+  tbody tr:last-child td { border-bottom: none; }
+  td.best { font-weight: 600; color: var(--good); }
+  td.collapse { color: var(--bad); }
+  .caption { font: 0.82rem/1.5 Inter, system-ui, sans-serif; color: var(--muted); margin-top: -8px; margin-bottom: 18px; }
+
+  .takeaway {
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    padding: 12px 16px; margin: 18px 0 20px;
+    border-radius: 0 8px 8px 0;
+  }
+
+  .part {
+    padding: 64px 0 0;
+    scroll-margin-top: 16px;
+  }
+  .part .label {
+    font: 600 0.78rem/1 Inter, system-ui, sans-serif;
+    text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted);
+  }
+  .part h2 {
+    font-size: 2rem; line-height: 1.2; margin: 8px 0 12px; font-weight: 600;
+    padding-bottom: 12px; border-bottom: 2px solid var(--text);
+  }
+  .part p { color: var(--muted); }
+  nav.toc .toc-part {
+    list-style: none; margin: 14px 0 4px -1.4em;
+    font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted);
+  }
+  nav.toc .toc-part:first-child { margin-top: 0; }
+  .source { font: 0.8rem/1.5 Inter, system-ui, sans-serif; color: var(--muted); margin-top: 4px; }
+
+  footer {
+    text-align: center; color: var(--muted);
+    font: 0.82rem/1.5 Inter, system-ui, sans-serif;
+    padding: 40px 0 60px;
+  }
+  @media (max-width: 600px) {
+    body { font-size: 16px; }
+    header.hero { padding: 48px 0 28px; }
+    .obs h2 { font-size: 1.35rem; }
+  }
+
+  /* ---------- Figure 1: animated pipeline ---------- */
+  :root {
+    --fig-box: #f1f1f0;
+    --fig-stroke: #8d8d92;
+    --fig-line: #2a2a2e;
+    --fig-ghost: 0.1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --fig-box: #26262a; --fig-stroke: #55555c; --fig-line: #d6d4cf; --fig-ghost: 0.14; }
+  }
+  :root[data-theme="dark"] { --fig-box: #26262a; --fig-stroke: #55555c; --fig-line: #d6d4cf; --fig-ghost: 0.14; }
+
+  figure.main-fig {
+    width: min(1120px, calc(100vw - 32px));
+    position: relative; left: 50%; transform: translateX(-50%);
+    margin: 8px 0 40px;
+  }
+  .fig-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .fig-scroll svg { display: block; width: 100%; min-width: 680px; height: auto; }
+  .fig-label {
+    font: 600 0.72rem/1 Inter, system-ui, sans-serif; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); text-align: center; margin-bottom: 6px;
+  }
+  .fig-flow { font: 500 0.95rem/1.4 Inter, system-ui, sans-serif; text-align: center; margin: 0 0 10px; color: var(--muted); }
+  .fig-flow b { color: var(--text); font-weight: 600; }
+
+  .anim-svg text { font-family: Inter, system-ui, sans-serif; fill: var(--text); }
+  .anim-svg .t-title { font-size: 15px; font-weight: 600; }
+  .anim-svg .t-blk { font-size: 11.5px; }
+  .anim-svg .t-blk.light { fill: #fff; }
+  .anim-svg .t-blk.dark { fill: #1d1d1f; }
+  .anim-svg .t-small { font-size: 11px; fill: var(--muted); }
+  .anim-svg .t-io { font-size: 13px; }
+  .anim-svg .frame { fill: var(--fig-box); stroke: var(--fig-stroke); stroke-width: 1.4; transition: stroke 0.4s, stroke-width 0.4s; }
+  .anim-svg .blk { stroke: #1d1d1f; stroke-width: 1.2; }
+  .anim-svg .edge { fill: none; stroke: var(--fig-line); stroke-width: 1.5; transition: stroke 0.4s; }
+  .anim-svg .skip { fill: none; stroke: #3a3a40; stroke-width: 1.2; }
+  .anim-svg .ah { fill: var(--fig-line); }
+  .anim-svg .particle { fill: var(--accent); }
+
+  /* stages: everything before the current stage is shown, later stages are ghosts */
+  .anim-svg [data-s] { transition: opacity 0.55s ease; }
+  .anim-svg.playing [data-s] { opacity: var(--fig-ghost); }
+  .anim-svg.playing [data-s].shown { opacity: 1; }
+  .anim-svg .active .frame { stroke: var(--accent); stroke-width: 2.6; }
+  .anim-svg .edge.active { stroke: var(--accent); }
+  .anim-svg .pop { transform-box: fill-box; transform-origin: center; }
+  .anim-svg.playing .active .pop { animation: fig-pop 0.6s ease both; animation-delay: var(--d, 0s); }
+  .anim-svg .splat { transform-box: fill-box; transform-origin: center; }
+  .anim-svg.playing .active .splat { animation: fig-splat 1.4s ease both; }
+  @keyframes fig-pop { 0% { transform: scale(0); } 70% { transform: scale(1.25); } 100% { transform: scale(1); } }
+  @keyframes fig-splat { 0% { transform: scale(0.3); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+
+  .fig-panel {
+    max-width: 860px; margin: 14px auto 0; padding: 14px 20px 6px;
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px;
+    font-family: Inter, system-ui, sans-serif;
+  }
+  .fig-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+  .fig-nav { display: flex; gap: 6px; }
+  .fig-panel button { font: inherit; cursor: pointer; }
+  .fig-nav button {
+    font-size: 0.78rem; font-weight: 500; color: var(--muted); background: var(--code-bg);
+    border: 0; border-radius: 999px; padding: 5px 11px; line-height: 1;
+  }
+  .fig-nav button:hover { color: var(--accent); background: var(--accent-soft); }
+  .fig-nav .fig-play { min-width: 64px; }
+  .fig-steps { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0; padding: 0; }
+  .fig-steps li { margin: 0; }
+  .fig-steps button {
+    font-size: 0.72rem; font-weight: 500; letter-spacing: 0.02em; line-height: 1;
+    padding: 5px 9px; border: 0; border-radius: 999px;
+    background: var(--code-bg); color: var(--muted);
+  }
+  .fig-steps button .n { opacity: 0.7; margin-right: 4px; }
+  .fig-steps button:hover { color: var(--accent); }
+  .fig-steps button[aria-current="step"] { background: var(--accent-soft); color: var(--accent); }
+  .fig-caption {
+    margin: 12px 0 8px; padding-top: 10px; border-top: 1px solid var(--rule); min-height: 3.4em;
+    font: 0.9rem/1.55 Inter, system-ui, sans-serif; color: var(--text);
+  }
+  .fig-caption b { color: var(--accent); font-weight: 600; }
+  .fig-note { max-width: 860px; margin: 8px auto 0; text-align: center; font: 0.8rem/1.5 Inter, system-ui, sans-serif; color: var(--muted); }
+
+  /* ---------- order of the experiments ---------- */
+  .roadmap { list-style: none; margin: 20px 0 8px; padding: 0; position: relative; }
+  .roadmap::before {
+    content: ""; position: absolute; left: 17px; top: 18px; bottom: 18px; width: 2px; background: var(--rule);
+  }
+  .roadmap > li { position: relative; padding: 0 0 0 54px; margin: 0 0 18px; }
+  .roadmap .num {
+    position: absolute; left: 0; top: 0; width: 36px; height: 36px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font: 600 0.95rem/1 Inter, system-ui, sans-serif;
+    background: var(--accent); color: var(--bg);
+  }
+  .roadmap li.later .num { background: var(--code-bg); color: var(--muted); }
+  .roadmap .card {
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 12px 16px;
+  }
+  .roadmap .card h4 { margin: 0 0 4px; font: 600 1.02rem/1.35 Inter, system-ui, sans-serif; }
+  .roadmap .card h4 a { color: var(--text); text-decoration: none; }
+  .roadmap .card h4 a:hover { color: var(--accent); }
+  .roadmap .card p { margin: 0 0 6px; font: 0.88rem/1.55 Inter, system-ui, sans-serif; color: var(--muted); }
+  .roadmap .card .res { font: 500 0.82rem/1.4 Inter, system-ui, sans-serif; color: var(--text); margin: 0; }
+  .roadmap .card .res b { color: var(--accent); font-weight: 600; }
+  .roadmap .card .tag { margin-right: 4px; }
+
+  /* ---------- step sections ---------- */
+  section.step { padding: 72px 0 8px; scroll-margin-top: 16px; border-bottom: 1px solid var(--rule); }
+  section.step .label {
+    font: 600 0.78rem/1 Inter, system-ui, sans-serif; text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--accent); display: flex; align-items: center; gap: 8px;
+  }
+  section.step .label .step-no {
+    display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+    border-radius: 50%; background: var(--accent); color: var(--bg); letter-spacing: 0;
+  }
+  section.step h2 {
+    font-size: 2rem; line-height: 1.2; margin: 10px 0 16px; font-weight: 600;
+    padding-bottom: 12px; border-bottom: 2px solid var(--text);
+  }
+  figure.step-anim {
+    margin: 0 0 20px; padding: 16px; background: var(--surface);
+    border: 1px solid var(--rule); border-radius: 10px;
+  }
+  .setup { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .setup .cell {
+    border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px;
+    font-family: Inter, system-ui, sans-serif; background: var(--bg);
+  }
+  .setup .cell .k {
+    display: block; font-size: 0.68rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px;
+  }
+  .setup .cell .v { font-size: 0.9rem; font-weight: 500; }
+  .setup .cell.changed { background: var(--accent-soft); border-color: var(--accent); }
+  .setup .cell.changed .k, .setup .cell.changed .v { color: var(--accent); }
+  @media (max-width: 640px) { .setup { grid-template-columns: repeat(2, 1fr); } }
+  .step-res { font: 0.95rem/1.55 Inter, system-ui, sans-serif; }
+  .step-res .k {
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin-right: 8px;
+  }
+  .step-res b { color: var(--accent); font-weight: 600; }
+  .anim-svg .fixed { fill: none; stroke: var(--muted); stroke-width: 1.3; stroke-dasharray: 4 3; }
+  .anim-svg .edge.back { stroke-dasharray: 5 4; }
+  .anim-svg .edge.back.active { stroke: var(--accent); }
+  .anim-svg .acc { fill: var(--accent); }
+  .anim-svg .back-t { fill: var(--accent); }
+  .anim-svg .ah-acc { fill: var(--accent); }
+  figure.step-anim .fig-scroll svg { min-width: 640px; }
+  figure.step-anim .fig-panel { margin: 10px 0 14px; padding-left: 0; padding-right: 0; border: 0; border-top: 1px solid var(--rule); border-radius: 0; background: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>Feed-forward Gaussian Splatting: Research Notes</h1>
+  <p class="subtitle">An informal, step-by-step walk through everything we trained and what we observed, from the first network on MCMC points to 120 DL3DV scenes.</p>
+  <div class="meta">ffgsplat · October 2026</div>
+</header>
+
+<figure class="main-fig" id="fig-pipeline">
+  <div class="fig-label">Figure 1 · Proposed solution</div>
+  <p class="fig-flow">Images ⇒ <b>Triangulation</b> ⇒ Points ⇒ <b>PT model</b> ⇒ GS params</p>
+  <div class="fig-scroll">
+<svg class="anim-svg" id="pipeline" viewBox="0 0 1150 680" role="img" aria-labelledby="fig-title fig-desc">
+<title id="fig-title">Proposed pipeline</title>
+<desc id="fig-desc">Images go through frozen DINOv3 and VGG19 encoders; RoMa v2 matches points into tracks; the 3D point-cloud builder triangulates them with the poses; the feature projector attaches image features to every point; LitePT maps the embedded points to Gaussian splatting parameters.</desc>
+<defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+  <linearGradient id="g-sem" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff5470"/><stop offset="1" stop-color="#9b4dff"/></linearGradient>
+  <linearGradient id="g-tex" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9b5cff"/><stop offset="1" stop-color="#ff9f5a"/></linearGradient>
+  <linearGradient id="g-emb" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#b061ff"/><stop offset="1" stop-color="#ff8a6a"/></linearGradient>
+  <filter id="f-splat" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.6"/></filter>
+</defs>
+<g data-s="0">
+<text class="t-io" x="40" y="22">Images</text>
+<rect class="blk" x="40" y="32" width="70" height="38" rx="5" fill="#a6a6a6"/>
+<rect class="blk" x="120" y="32" width="70" height="38" rx="5" fill="#d9d9d9"/>
+<rect class="blk" x="200" y="32" width="70" height="38" rx="5" fill="#d9d9d9"/>
+<rect class="blk" x="330" y="32" width="70" height="38" rx="5" fill="#d9d9d9"/>
+<text class="t-title" x="292" y="56">…</text>
+</g>
+<path id="e-img-dino" class="edge" data-s="1" d="M110 70 V94" marker-end="url(#ah)"/>
+<path id="e-img-vgg" class="edge" data-s="1" d="M365 70 V94" marker-end="url(#ah)"/>
+<g data-s="1">
+<rect class="frame" x="30" y="95" width="210" height="230" rx="14"/>
+<text class="t-title" x="44" y="120">DINOv3</text>
+<text x="214" y="121" font-size="17"><title>frozen</title>❄️</text>
+<rect class="blk" x="48" y="132" width="174" height="26" fill="#a3abff"/>
+<text class="t-blk dark" x="135.0" y="149.0" text-anchor="middle">PE</text>
+<rect class="blk" x="48" y="166" width="174" height="26" fill="#5b63ee"/>
+<text class="t-blk light" x="135.0" y="183.0" text-anchor="middle">Transformer block</text>
+<rect class="blk" x="48" y="200" width="174" height="26" fill="#5b63ee"/>
+<text class="t-blk light" x="135.0" y="217.0" text-anchor="middle">Transformer block</text>
+<rect class="blk" x="48" y="258" width="174" height="26" fill="#5b63ee"/>
+<text class="t-blk light" x="135.0" y="275.0" text-anchor="middle">Transformer block</text>
+<text class="t-title" x="135" y="246" text-anchor="middle">…</text>
+<rect class="frame" x="270" y="95" width="210" height="230" rx="14"/>
+<text class="t-title" x="284" y="120">VGG19</text>
+<text x="454" y="121" font-size="17"><title>frozen</title>❄️</text>
+<rect class="blk" x="288" y="132" width="174" height="12" fill="#a3abff"/>
+<rect class="blk" x="288" y="150" width="174" height="12" fill="#a3abff"/>
+<rect class="blk" x="305" y="178" width="140" height="12" fill="#ffad4d"/>
+<rect class="blk" x="305" y="194" width="140" height="12" fill="#a3abff"/>
+<rect class="blk" x="305" y="210" width="140" height="12" fill="#a3abff"/>
+<rect class="blk" x="325" y="236" width="100" height="12" fill="#ffad4d"/>
+<rect class="blk" x="325" y="252" width="100" height="12" fill="#a3abff"/>
+<rect class="blk" x="325" y="268" width="100" height="12" fill="#a3abff"/>
+<text class="t-title" x="375" y="306" text-anchor="middle">•••</text>
+</g>
+<path id="e-dino-fm" class="edge" data-s="2" d="M115 325 V346" marker-end="url(#ah)"/>
+<path id="e-vgg-fm" class="edge" data-s="2" d="M355 325 V346" marker-end="url(#ah)"/>
+<path id="e-t1" class="edge" data-s="2" d="M462 156 H500" marker-end="url(#ah)"/>
+<path id="e-t2" class="edge" data-s="2" d="M445 216 H506" marker-end="url(#ah)"/>
+<path id="e-t3" class="edge" data-s="2" d="M425 270 H512" marker-end="url(#ah)"/>
+<g data-s="2">
+<rect class="blk" x="70" y="346" width="110" height="56" rx="10.1" fill="url(#g-sem)"/>
+<rect class="blk" x="65" y="351" width="110" height="56" rx="10.1" fill="url(#g-sem)"/>
+<rect class="blk" x="60" y="356" width="110" height="56" rx="10.1" fill="url(#g-sem)"/>
+<rect class="blk" x="310" y="346" width="110" height="56" rx="10.1" fill="url(#g-tex)"/>
+<rect class="blk" x="305" y="351" width="110" height="56" rx="10.1" fill="url(#g-tex)"/>
+<rect class="blk" x="300" y="356" width="110" height="56" rx="10.1" fill="url(#g-tex)"/>
+<text class="t-small" x="235" y="392" text-anchor="middle">Feature maps</text>
+<rect class="blk" x="512" y="132" width="34" height="34" rx="6.1" fill="url(#g-tex)"/>
+<rect class="blk" x="508" y="136" width="34" height="34" rx="6.1" fill="url(#g-tex)"/>
+<rect class="blk" x="504" y="140" width="34" height="34" rx="6.1" fill="url(#g-tex)"/>
+<rect class="blk" x="518" y="194" width="26" height="26" rx="4.7" fill="url(#g-tex)"/>
+<rect class="blk" x="514" y="198" width="26" height="26" rx="4.7" fill="url(#g-tex)"/>
+<rect class="blk" x="510" y="202" width="26" height="26" rx="4.7" fill="url(#g-tex)"/>
+<rect class="blk" x="522" y="254" width="18" height="18" rx="3.2" fill="url(#g-tex)"/>
+<rect class="blk" x="519" y="257" width="18" height="18" rx="3.2" fill="url(#g-tex)"/>
+<rect class="blk" x="516" y="260" width="18" height="18" rx="3.2" fill="url(#g-tex)"/>
+<text class="t-small" x="530" y="122" text-anchor="middle">Texture features</text>
+</g>
+<path id="e-fm-roma1" class="edge" data-s="3" d="M115 412 V438" marker-end="url(#ah)"/>
+<path id="e-fm-roma2" class="edge" data-s="3" d="M355 412 V438" marker-end="url(#ah)"/>
+<g data-s="3">
+<rect class="frame" x="30" y="440" width="450" height="140" rx="14"/>
+<text class="t-title" x="44" y="465">RoMa v2</text>
+<rect class="blk" x="48" y="476" width="414" height="28" fill="#7ed957"/>
+<text class="t-blk dark" x="255.0" y="494.0" text-anchor="middle">Frame clustering</text>
+<rect class="blk" x="48" y="510" width="414" height="28" fill="#7ed957"/>
+<text class="t-blk dark" x="255.0" y="528.0" text-anchor="middle">Feature detector</text>
+<rect class="blk" x="48" y="544" width="414" height="28" fill="#7ed957"/>
+<text class="t-blk dark" x="255.0" y="562.0" text-anchor="middle">Point matcher</text>
+</g>
+<path id="e-roma-tracks" class="edge" data-s="3" d="M215 580 V598" marker-end="url(#ah)"/>
+<g data-s="3" class="tracks">
+<text class="t-io" x="40" y="626">Point tracks</text>
+<text class="t-small" x="40" y="642">2D–2D</text>
+<rect class="blk" x="170" y="600" width="90" height="44" rx="5" fill="#a6a6a6"/>
+<text class="t-small" x="215" y="662" text-anchor="middle">Ref. image</text>
+<rect x="298" y="592" width="90" height="44" rx="5" fill="#d9d9d9" stroke="#1d1d1f" stroke-dasharray="3 2"/>
+<rect x="294" y="596" width="90" height="44" rx="5" fill="#d9d9d9" stroke="#1d1d1f" stroke-dasharray="3 2"/>
+<rect x="290" y="600" width="90" height="44" rx="5" fill="#d9d9d9" stroke="#1d1d1f" stroke-dasharray="3 2"/>
+<text class="t-small" x="335" y="662" text-anchor="middle">Neighbours</text>
+<path id="track-path" d="M186 612 L332 626" fill="none" stroke="#e8453c" stroke-width="1.2" stroke-dasharray="3 3"/>
+<path d="M186 605 l2 4.5 4.8 .4 -3.6 3.1 1.1 4.7 -4.3 -2.5 -4.3 2.5 1.1 -4.7 -3.6 -3.1 4.8 -.4z" fill="#ffb627"/>
+<circle class="track-dot" cx="332" cy="626" r="3.2" fill="#e8453c"/>
+</g>
+<path id="e-roma-poses" class="edge" data-s="4" d="M480 520 H526" marker-end="url(#ah)"/>
+<path id="e-poses-builder" class="edge" data-s="4" d="M594 520 H638" marker-end="url(#ah)"/>
+<path id="e-tracks-builder" class="edge" data-s="4" d="M384 622 H755 V582" marker-end="url(#ah)"/>
+<g data-s="4">
+<text class="t-io" x="560" y="484" text-anchor="middle">Poses</text>
+<g transform="translate(560 520)"><path d="M-24 -8 L8 -20 L24 8 L-8 20z" fill="#5b63ee" fill-opacity=".35" stroke="#5b63ee" stroke-width=".8"/><path d="M-26 6 L22 -6 L26 6 L-22 18z" fill="#e8453c" fill-opacity=".35" stroke="#e8453c" stroke-width=".8"/><path d="M-4 -26 L6 -24 L4 26 L-6 24z" fill="#3fbf55" fill-opacity=".45" stroke="#3fbf55" stroke-width=".8"/></g>
+<rect class="frame" x="640" y="440" width="230" height="140" rx="14"/>
+<text class="t-title" x="654" y="465">3D PCL builder</text>
+<rect class="blk" x="658" y="476" width="194" height="28" fill="#7ed957"/>
+<text class="t-blk dark" x="755.0" y="494.0" text-anchor="middle">Point sampler (global)</text>
+<rect class="blk" x="658" y="510" width="194" height="28" fill="#7ed957"/>
+<text class="t-blk dark" x="755.0" y="528.0" text-anchor="middle">Point sampler (frame)</text>
+<rect class="blk" x="658" y="544" width="194" height="28" fill="#7ed957"/>
+<text class="t-blk dark" x="755.0" y="562.0" text-anchor="middle">Triangulator</text>
+</g>
+<path id="e-builder-pcl" class="edge" data-s="4" d="M755 440 V420" marker-end="url(#ah)"/>
+<g data-s="4">
+<text class="t-io" x="690" y="398" text-anchor="end">Scene PCL</text>
+<circle class="pop" style="--d:0.00s" cx="712" cy="400" r="6" fill="#1a237e"/>
+<circle class="pop" style="--d:0.12s" cx="742" cy="382" r="6" fill="#1a237e"/>
+<circle class="pop" style="--d:0.24s" cx="758" cy="406" r="6" fill="#1a237e"/>
+<circle class="pop" style="--d:0.36s" cx="790" cy="390" r="6" fill="#1a237e"/>
+<circle class="pop" style="--d:0.48s" cx="818" cy="402" r="6" fill="#1a237e"/>
+<circle class="pop" style="--d:0.60s" cx="772" cy="372" r="6" fill="#1a237e"/>
+</g>
+<path id="e-t1-proj" class="edge" data-s="5" d="M546 155 H658" marker-end="url(#ah)"/>
+<path id="e-t2-proj" class="edge" data-s="5" d="M544 213 C600 213 600 190 658 190" marker-end="url(#ah)"/>
+<path id="e-t3-proj" class="edge" data-s="5" d="M540 268 C600 268 600 230 658 230" marker-end="url(#ah)"/>
+<path id="e-sem-proj" class="edge" data-s="5" d="M172 372 C215 372 215 336 260 336 H560 C605 336 605 285 658 285" marker-end="url(#ah)"/>
+<path id="e-pcl-proj" class="edge" data-s="5" d="M755 366 V327" marker-end="url(#ah)"/>
+<g data-s="5">
+<text class="t-small" x="575" y="354" text-anchor="middle">Semantic features</text>
+<rect class="frame" x="640" y="95" width="230" height="230" rx="14"/>
+<text class="t-title" x="654" y="120">Feature projector</text>
+<text x="844" y="121" font-size="17"><title>trained</title>🔥</text>
+<rect class="blk" x="660" y="135" width="90" height="30" fill="#7ed957"/>
+<text class="t-blk dark" x="705.0" y="154.0" text-anchor="middle">Interp</text>
+<rect class="blk" x="764" y="135" width="90" height="30" fill="#a3abff"/>
+<text class="t-blk dark" x="809.0" y="154.0" text-anchor="middle">MLP</text>
+<rect class="blk" x="660" y="175" width="90" height="30" fill="#7ed957"/>
+<text class="t-blk dark" x="705.0" y="194.0" text-anchor="middle">Interp</text>
+<rect class="blk" x="764" y="175" width="90" height="30" fill="#a3abff"/>
+<text class="t-blk dark" x="809.0" y="194.0" text-anchor="middle">MLP</text>
+<rect class="blk" x="660" y="215" width="90" height="30" fill="#7ed957"/>
+<text class="t-blk dark" x="705.0" y="234.0" text-anchor="middle">Interp</text>
+<rect class="blk" x="764" y="215" width="90" height="30" fill="#a3abff"/>
+<text class="t-blk dark" x="809.0" y="234.0" text-anchor="middle">MLP</text>
+<rect class="blk" x="660" y="270" width="90" height="30" fill="#7ed957"/>
+<text class="t-blk dark" x="705.0" y="289.0" text-anchor="middle">Interp</text>
+<rect class="blk" x="764" y="270" width="90" height="30" fill="#a3abff"/>
+<text class="t-blk dark" x="809.0" y="289.0" text-anchor="middle">MLP</text>
+</g>
+<path id="e-proj-emb" class="edge" data-s="5" d="M755 95 V82" marker-end="url(#ah)"/>
+<g data-s="5">
+<text class="t-io" x="755" y="22" text-anchor="middle">Scene PCL <tspan font-weight="600">w/ embeddings</tspan></text>
+<circle class="pop" style="--d:0.00s" cx="712" cy="58" r="7" fill="url(#g-emb)"/>
+<circle class="pop" style="--d:0.10s" cx="738" cy="70" r="4" fill="url(#g-emb)"/>
+<circle class="pop" style="--d:0.20s" cx="752" cy="46" r="6" fill="url(#g-emb)"/>
+<circle class="pop" style="--d:0.30s" cx="776" cy="72" r="7" fill="url(#g-emb)"/>
+<circle class="pop" style="--d:0.40s" cx="796" cy="52" r="4" fill="url(#g-emb)"/>
+<circle class="pop" style="--d:0.50s" cx="818" cy="60" r="7" fill="url(#g-emb)"/>
+</g>
+<path id="e-emb-lit" class="edge" data-s="6" d="M836 60 H1025 V93" marker-end="url(#ah)"/>
+<g data-s="6">
+<rect class="frame" x="920" y="95" width="210" height="230" rx="14"/>
+<text class="t-title" x="934" y="120">LitePT</text>
+<text x="1104" y="121" font-size="17"><title>trained</title>🔥</text>
+<rect class="blk" x="938" y="133" width="170" height="13" fill="#a3abff"/>
+<rect class="blk" x="938" y="153" width="150" height="13" fill="#a3abff"/>
+<rect class="blk" x="938" y="173" width="130" height="13" fill="#a3abff"/>
+<rect class="blk" x="938" y="193" width="110" height="13" fill="#5b63ee"/>
+<rect class="blk" x="938" y="213" width="90" height="13" fill="#5b63ee"/>
+<rect class="blk" x="938" y="233" width="110" height="13" fill="#5b63ee"/>
+<rect class="blk" x="938" y="253" width="130" height="13" fill="#a3abff"/>
+<rect class="blk" x="938" y="273" width="150" height="13" fill="#a3abff"/>
+<rect class="blk" x="938" y="293" width="170" height="13" fill="#a3abff"/>
+<path class="skip" d="M1100 146 V291" marker-end="url(#ah)"/>
+<path class="skip" d="M1080 166 V271" marker-end="url(#ah)"/>
+<path class="skip" d="M1060 186 V251" marker-end="url(#ah)"/>
+<path class="skip" d="M1040 206 V231" marker-end="url(#ah)"/>
+</g>
+<path id="e-lit-gs" class="edge" data-s="6" d="M1025 325 V352" marker-end="url(#ah)"/>
+<g data-s="6" class="gs">
+<text class="t-io" x="1025" y="372" text-anchor="middle">Gaussian splatting params</text>
+<g class="splat" filter="url(#f-splat)">
+<ellipse cx="1022" cy="520" rx="7" ry="34" transform="rotate(0 1022 520)" fill="#3b2a1e" fill-opacity="0.9"/>
+<ellipse cx="1000" cy="432" rx="34" ry="14" transform="rotate(-18 1000 432)" fill="#2f8f5b" fill-opacity="0.75"/>
+<ellipse cx="1050" cy="425" rx="30" ry="13" transform="rotate(15 1050 425)" fill="#3aa36a" fill-opacity="0.75"/>
+<ellipse cx="1025" cy="448" rx="40" ry="18" transform="rotate(0 1025 448)" fill="#1f7a4a" fill-opacity="0.8"/>
+<ellipse cx="985" cy="470" rx="28" ry="12" transform="rotate(-8 985 470)" fill="#2e9a60" fill-opacity="0.7"/>
+<ellipse cx="1065" cy="465" rx="30" ry="12" transform="rotate(10 1065 465)" fill="#279056" fill-opacity="0.7"/>
+<ellipse cx="1030" cy="485" rx="26" ry="14" transform="rotate(0 1030 485)" fill="#1c6b40" fill-opacity="0.75"/>
+<ellipse cx="1012" cy="410" rx="18" ry="9" transform="rotate(-25 1012 410)" fill="#57c27f" fill-opacity="0.7"/>
+<ellipse cx="1046" cy="404" rx="16" ry="8" transform="rotate(20 1046 404)" fill="#4cb874" fill-opacity="0.7"/>
+<ellipse cx="1025" cy="552" rx="44" ry="10" transform="rotate(0 1025 552)" fill="#5b4a3a" fill-opacity="0.7"/>
+</g></g>
+</svg>
+  </div>
+  <div class="fig-panel">
+    <div class="fig-bar">
+      <div class="fig-nav">
+        <button type="button" class="fig-prev" aria-label="Previous step">←</button>
+        <button type="button" class="fig-play">Pause</button>
+        <button type="button" class="fig-next" aria-label="Next step">→</button>
+      </div>
+      <ol class="fig-steps"></ol>
+    </div>
+    <p class="fig-caption" aria-live="polite"></p>
+  </div>
+  <p class="fig-note">❄️ frozen · 🔥 trained. Redrawn from the last page of <code>docs/explanation.pdf</code>.</p>
+</figure>
+
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li class="toc-part">Start</li>
+    <li><a href="#goal">Goal and baseline</a></li>
+    <li><a href="#order">The order of the experiments</a></li>
+    <li class="toc-part">Step 1 · LitePT on bonsai, colours only, no augmentation</li>
+    <li><a href="#obs-001">The point spacing sets the LitePT voxel size</a><span class="tag">001–002</span></li>
+    <li><a href="#obs-003">A network on MCMC means fits bonsai to 28.75 dB</a><span class="tag">003</span></li>
+    <li class="toc-part">Step 2 · Add augmentation</li>
+    <li><a href="#obs-004">Augmentation makes eval collapse</a><span class="tag">004</span></li>
+    <li><a href="#obs-005">Removing the mirror does not fix the collapse</a><span class="tag">005</span></li>
+    <li><a href="#obs-006">LayerNorm instead of BatchNorm removes the collapse</a><span class="tag">006</span></li>
+    <li class="toc-part">Step 3 · Multiple scenes, with augmentation</li>
+    <li><a href="#obs-007">One model on four indoor scenes: ~20 dB, LR 2e-3 for 20k</a><span class="tag">007</span></li>
+    <li><a href="#obs-008">A scale-tail penalty helps, and longer training keeps helping</a><span class="tag">008</span></li>
+    <li class="toc-part">Step 4 · Switch to EDGS initialisation</li>
+    <li><a href="#obs-009">EDGS points need the RoMa features</a><span class="tag">009</span></li>
+    <li><a href="#obs-010">Indoor with EDGS + RoMa and 64-view updates beats the MCMC-points model</a><span class="tag">010</span></li>
+    <li><a href="#obs-011">All seven Mip-NeRF scenes in one model: 21.25 dB</a><span class="tag">011</span></li>
+    <li><a href="#obs-012">Muon beats AdamW on bonsai</a><span class="tag">012</span></li>
+    <li><a href="#obs-013">Muon beats AdamW on the indoor scenes too</a><span class="tag">013</span></li>
+    <li><a href="#obs-014">Muon on all seven scenes did not finish</a><span class="tag">014</span></li>
+    <li class="toc-part">Step 5 · Back to bonsai</li>
+    <li><a href="#setup">Common setup</a></li>
+    <li><a href="#obs-015">Predicted position offsets help</a><span class="tag">015</span></li>
+    <li><a href="#obs-015-25">A larger offset bound does not help</a><span class="tag">015 · 2.5 vox</span></li>
+    <li><a href="#obs-016">Positional encoding speeds up training, then eval collapses</a><span class="tag">016</span></li>
+    <li><a href="#obs-016-noraw">The unbounded raw-p tail is not the cause</a><span class="tag">509</span></li>
+    <li><a href="#obs-016-clamp">Clamping only delays the collapse</a><span class="tag">511</span></li>
+    <li><a href="#obs-dp0">Drop-path causes the eval collapse</a><span class="tag">512</span></li>
+    <li><a href="#obs-513">PE without raw p and without drop-path is the best bonsai run so far</a><span class="tag">513</span></li>
+    <li><a href="#obs-017">Larger Gaussians, SH 3, no augmentation: +6.1 dB</a><span class="tag">017</span></li>
+    <li class="toc-part">Step 6 · Many scenes (DL3DV)</li>
+    <li><a href="#obs-018">Scaling the 017 recipe to 120 DL3DV scenes</a><span class="tag">018</span></li>
+    <li><a href="#obs-018-5">The DL3DV adaptation trains like the Mip-NeRF runs</a><span class="tag">018 · 5 scenes</span></li>
+    <li><a href="#obs-018-run">120 scenes after 12k steps: unseen scenes close to seen</a><span class="tag">018 · 120 scenes</span></li>
+    <li class="toc-part">Next</li>
+    <li><a href="#open">Open questions / next</a></li>
+  </ol>
+</nav>
+
+<!-- ============================================================ -->
+<section class="obs" id="goal">
+  <div class="kicker">Start</div>
+  <h2>Goal and baseline</h2>
+  <p>Replace gsplat's per-Gaussian optimization with a <strong>point-conditioned network</strong>: LitePT plus a thin per-point head predicts every Gaussian's scale, rotation, opacity and SH colour from its position, <code>f(mean_i) → (scale_i, quat_i, opacity_i, sh0_i, shN_i)</code>. The means are a fixed input; the only trainable weights are the network's, trained end to end through gsplat's rasterizer with L1 + SSIM (λ = 0.2). Open question from the start: a per-scene reparameterization, or a prior that works across scenes.</p>
+  <p>Reference: gsplat MCMC baselines on Mip-NeRF 360 (30k steps, eval split):</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>scene</th><th>Gaussians</th><th>PSNR / SSIM / LPIPS</th></tr></thead>
+    <tbody>
+      <tr><td>bonsai</td><td>1.0M</td><td>32.80 / 0.953 / 0.106</td></tr>
+      <tr><td>counter</td><td>1.0M</td><td>29.44 / 0.924 / 0.130</td></tr>
+      <tr><td>kitchen</td><td>1.0M</td><td>31.76 / 0.936 / 0.087</td></tr>
+      <tr><td>room</td><td>1.0M</td><td>32.27 / 0.937 / 0.132</td></tr>
+      <tr><td>bicycle</td><td>1.5M</td><td>25.77 / 0.784 / 0.165</td></tr>
+      <tr><td>garden</td><td>1.5M</td><td>27.59 / 0.864 / 0.092</td></tr>
+      <tr><td>stump</td><td>1.5M</td><td>27.11 / 0.796 / 0.148</td></tr>
+    </tbody>
+  </table></div>
+  <p class="source">Sources: <code>n.md</code>; <code>$WORK/experiments/mcmc_baselines/&lt;scene&gt;/stats/val_step29999.json</code>.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="order">
+  <div class="kicker">Start</div>
+  <h2>The order of the experiments</h2>
+  <p>Each step adds one thing to the previous one. The rest of the page follows this order.</p>
+  <ol class="roadmap">
+    <li><span class="num">1</span><div class="card">
+      <h4><a href="#step1">LitePT on bonsai, colours only, no augmentation</a></h4>
+      <p class="res"><span class="tag">001–003</span> bonsai <b>28.75 dB</b> in 10k steps (MCMC: 32.80).</p>
+    </div></li>
+    <li><span class="num">2</span><div class="card">
+      <h4><a href="#step2">Add augmentation: rotation, scaling, voxel jitter</a></h4>
+      <p class="res"><span class="tag">004–006</span> eval collapses with BatchNorm; LayerNorm fixes it: bonsai <b>23.39 dB</b>.</p>
+    </div></li>
+    <li><span class="num">3</span><div class="card">
+      <h4><a href="#step3">Multiple scenes, with augmentation</a></h4>
+      <p class="res"><span class="tag">007–008</span> ~<b>20 dB</b> at 20k; with a scale-tail penalty and longer training <b>22.12 dB</b> at 120k.</p>
+    </div></li>
+    <li><span class="num">4</span><div class="card">
+      <h4><a href="#step4">Switch to EDGS initialisation</a></h4>
+      <p class="res"><span class="tag">009–014</span> bonsai <b>21.49 dB</b> (rgb only: 18.46); indoor <b>22.48 dB</b> with Muon; all seven scenes 21.25 dB.</p>
+    </div></li>
+    <li class="later"><span class="num">5</span><div class="card">
+      <h4><a href="#step5">Back to bonsai: what limits quality</a></h4>
+      <p class="res"><span class="tag">015–017</span> offsets, PE, no drop-path, larger Gaussians + SH 3, no augmentation: bonsai <b>28.7 dB</b>.</p>
+    </div></li>
+    <li class="later"><span class="num">6</span><div class="card">
+      <h4><a href="#step6">Many scenes (DL3DV)</a></h4>
+      <p class="res"><span class="tag">018</span> running: seen <b>18.04</b> / unseen <b>17.44 dB</b> at 12k.</p>
+    </div></li>
+  </ol>
+</section>
+
+<!-- ============================================================ -->
+<section class="step" id="step1">
+  <div class="label"><span class="step-no">1</span>Step 1 <span class="tag grey">001–003</span></div>
+  <h2>LitePT on bonsai, colours only, no augmentation</h2>
+  <figure class="step-anim" id="step1-anim" data-step="1">
+    <div class="fig-scroll">
+<svg class="anim-svg" id="step1-svg" viewBox="0 0 1100 470" role="img" aria-labelledby="s1-title s1-desc">
+<title id="s1-title">Step 1: LitePT on bonsai, colours only</title>
+<desc id="s1-desc">The MCMC means of bonsai, with their colour as the only feature, go through LitePT and a per-point head that predicts scale, rotation, opacity and SH colour. The means are kept fixed. The Gaussians are rendered with gsplat, compared with the ground-truth image (L1 + SSIM) and only the network is updated.</desc>
+<defs>
+  <marker id="s1-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+  <marker id="s1-ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path class="ah-acc" d="M0,0 L10,5 L0,10 z"/></marker>
+  <filter id="s1-blur" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="1.6"/></filter>
+  <filter id="s1-blur-sm" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="0.7"/></filter>
+</defs>
+<g data-s="0">
+<text class="t-io" x="140" y="52" text-anchor="middle">MCMC means <tspan class="t-small">· bonsai, 1M points</tspan></text>
+<circle class="pop" style="--d:0.000s" cx="106.2" cy="280.4" r="2.8" fill="#9b8068"/>
+<circle class="pop" style="--d:0.008s" cx="173.1" cy="271.5" r="2.8" fill="#8a6f5a"/>
+<circle class="pop" style="--d:0.016s" cx="97.7" cy="281.7" r="2.8" fill="#9b8068"/>
+<circle class="pop" style="--d:0.024s" cx="98.9" cy="276.9" r="2.8" fill="#6d5a4b"/>
+<circle class="pop" style="--d:0.032s" cx="98.1" cy="272.2" r="2.8" fill="#6d5a4b"/>
+<circle class="pop" style="--d:0.040s" cx="146.7" cy="271.9" r="2.8" fill="#8a6f5a"/>
+<circle class="pop" style="--d:0.048s" cx="147.5" cy="290.2" r="2.8" fill="#8a6f5a"/>
+<circle class="pop" style="--d:0.056s" cx="130.6" cy="288.5" r="2.8" fill="#8a6f5a"/>
+<circle class="pop" style="--d:0.064s" cx="176.9" cy="271.5" r="2.8" fill="#6d5a4b"/>
+<circle class="pop" style="--d:0.072s" cx="143.8" cy="283.4" r="2.8" fill="#9b8068"/>
+<circle class="pop" style="--d:0.080s" cx="170.7" cy="279.9" r="2.8" fill="#8a6f5a"/>
+<circle class="pop" style="--d:0.088s" cx="147.2" cy="273.3" r="2.8" fill="#8a6f5a"/>
+<circle class="pop" style="--d:0.096s" cx="144.6" cy="281.9" r="2.8" fill="#8a6f5a"/>
+<circle class="pop" style="--d:0.104s" cx="150.9" cy="288.1" r="2.8" fill="#6d5a4b"/>
+<circle class="pop" style="--d:0.112s" cx="133.6" cy="291.8" r="2.8" fill="#6d5a4b"/>
+<circle class="pop" style="--d:0.120s" cx="179.6" cy="284.9" r="2.8" fill="#6d5a4b"/>
+<circle class="pop" style="--d:0.128s" cx="138.8" cy="268.0" r="2.8" fill="#5b4636"/>
+<circle class="pop" style="--d:0.136s" cx="143.9" cy="260.7" r="2.8" fill="#5b4636"/>
+<circle class="pop" style="--d:0.144s" cx="142.7" cy="253.5" r="2.8" fill="#6e543f"/>
+<circle class="pop" style="--d:0.152s" cx="147.5" cy="246.2" r="2.8" fill="#6e543f"/>
+<circle class="pop" style="--d:0.160s" cx="150.2" cy="238.9" r="2.8" fill="#6e543f"/>
+<circle class="pop" style="--d:0.168s" cx="150.4" cy="231.6" r="2.8" fill="#5b4636"/>
+<circle class="pop" style="--d:0.176s" cx="147.7" cy="224.4" r="2.8" fill="#6e543f"/>
+<circle class="pop" style="--d:0.184s" cx="147.4" cy="217.1" r="2.8" fill="#6e543f"/>
+<circle class="pop" style="--d:0.192s" cx="146.1" cy="209.8" r="2.8" fill="#6e543f"/>
+<circle class="pop" style="--d:0.200s" cx="145.9" cy="202.5" r="2.8" fill="#5b4636"/>
+<circle class="pop" style="--d:0.208s" cx="145.6" cy="195.3" r="2.8" fill="#6e543f"/>
+<circle class="pop" style="--d:0.216s" cx="140.5" cy="188.0" r="2.8" fill="#6e543f"/>
+<circle class="pop" style="--d:0.224s" cx="76.5" cy="171.9" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.232s" cx="107.4" cy="185.0" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.240s" cx="70.7" cy="185.1" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.248s" cx="95.8" cy="168.8" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.256s" cx="128.8" cy="181.1" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.264s" cx="91.3" cy="160.1" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.272s" cx="120.9" cy="184.3" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.280s" cx="79.7" cy="171.3" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.288s" cx="99.4" cy="173.5" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.296s" cx="71.9" cy="195.6" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.304s" cx="117.9" cy="189.7" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.312s" cx="95.8" cy="190.7" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.320s" cx="109.8" cy="172.5" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.328s" cx="126.0" cy="180.3" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.336s" cx="110.7" cy="179.6" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.344s" cx="114.0" cy="197.7" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.352s" cx="72.0" cy="183.7" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.360s" cx="95.4" cy="190.9" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.368s" cx="80.6" cy="195.1" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.376s" cx="89.1" cy="166.1" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.384s" cx="81.6" cy="165.1" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.392s" cx="122.2" cy="169.6" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.400s" cx="165.2" cy="181.4" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.408s" cx="160.6" cy="173.7" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.416s" cx="196.2" cy="176.5" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.424s" cx="202.3" cy="183.8" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.432s" cx="195.2" cy="172.0" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.440s" cx="207.3" cy="166.1" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.448s" cx="200.8" cy="158.8" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.456s" cx="159.9" cy="154.6" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.464s" cx="174.2" cy="178.3" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.472s" cx="205.2" cy="171.3" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.480s" cx="177.1" cy="180.4" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.488s" cx="180.6" cy="155.6" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.496s" cx="166.7" cy="170.9" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.504s" cx="163.8" cy="187.1" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.512s" cx="182.9" cy="159.0" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.520s" cx="176.2" cy="160.5" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.528s" cx="199.0" cy="164.3" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.536s" cx="152.6" cy="167.7" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.544s" cx="164.6" cy="157.9" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.552s" cx="192.6" cy="151.8" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.560s" cx="189.4" cy="187.9" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.568s" cx="212.2" cy="170.6" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.576s" cx="138.3" cy="156.9" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.584s" cx="107.1" cy="143.9" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.592s" cx="160.9" cy="131.8" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.600s" cx="159.8" cy="146.3" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.608s" cx="148.0" cy="155.1" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.616s" cx="153.4" cy="121.3" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.624s" cx="143.2" cy="129.0" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.632s" cx="166.9" cy="124.0" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.640s" cx="124.9" cy="137.5" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.648s" cx="169.9" cy="148.7" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.656s" cx="109.8" cy="141.0" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.664s" cx="137.7" cy="125.7" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.672s" cx="167.3" cy="139.3" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.680s" cx="144.8" cy="127.0" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.688s" cx="169.0" cy="133.5" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.696s" cx="154.9" cy="151.5" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.704s" cx="175.3" cy="138.2" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.712s" cx="105.7" cy="132.0" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.720s" cx="155.8" cy="135.1" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.728s" cx="156.3" cy="138.0" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.736s" cx="141.6" cy="155.3" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.744s" cx="108.4" cy="129.7" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.752s" cx="158.1" cy="128.0" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.760s" cx="123.0" cy="116.6" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.768s" cx="118.1" cy="198.3" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.776s" cx="146.9" cy="195.2" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.784s" cx="157.1" cy="191.4" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.792s" cx="122.2" cy="179.9" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.800s" cx="148.4" cy="201.1" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.808s" cx="126.1" cy="186.4" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.816s" cx="122.3" cy="187.6" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.824s" cx="144.6" cy="187.1" r="2.8" fill="#3aa36a"/>
+<circle class="pop" style="--d:0.832s" cx="136.2" cy="205.8" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.840s" cx="135.9" cy="190.9" r="2.8" fill="#2f8f5b"/>
+<circle class="pop" style="--d:0.848s" cx="120.9" cy="195.0" r="2.8" fill="#4cb874"/>
+<circle class="pop" style="--d:0.856s" cx="130.9" cy="185.0" r="2.8" fill="#57c27f"/>
+<circle class="pop" style="--d:0.864s" cx="121.9" cy="193.9" r="2.8" fill="#1f7a4a"/>
+<circle class="pop" style="--d:0.872s" cx="127.1" cy="189.6" r="2.8" fill="#4cb874"/>
+<text class="t-small" x="140" y="322" text-anchor="middle">per-point feature: colour (rgb, 3 channels)</text>
+<rect x="110" y="330" width="16" height="10" rx="2" fill="#e8453c"/>
+<rect x="132" y="330" width="16" height="10" rx="2" fill="#3fbf55"/>
+<rect x="154" y="330" width="16" height="10" rx="2" fill="#5b63ee"/>
+</g>
+<path id="s1-e-pts-lit" class="edge" data-s="1" d="M262 200 H326" marker-end="url(#s1-ah)"/>
+<g data-s="1">
+<rect class="frame" x="330" y="90" width="190" height="220" rx="14"/>
+<text class="t-title" x="344" y="115">LitePT</text>
+<text x="494" y="116" font-size="17"><title>trained</title>🔥</text>
+<rect class="blk" x="346" y="126" width="150" height="12" fill="#a3abff"/>
+<rect class="blk" x="346" y="145" width="134" height="12" fill="#a3abff"/>
+<rect class="blk" x="346" y="164" width="118" height="12" fill="#a3abff"/>
+<rect class="blk" x="346" y="183" width="102" height="12" fill="#5b63ee"/>
+<rect class="blk" x="346" y="202" width="86" height="12" fill="#5b63ee"/>
+<rect class="blk" x="346" y="221" width="102" height="12" fill="#5b63ee"/>
+<rect class="blk" x="346" y="240" width="118" height="12" fill="#a3abff"/>
+<rect class="blk" x="346" y="259" width="134" height="12" fill="#a3abff"/>
+<rect class="blk" x="346" y="278" width="150" height="12" fill="#a3abff"/>
+<path class="skip" d="M488 138 V276" marker-end="url(#s1-ah)"/>
+<path class="skip" d="M472 157 V257" marker-end="url(#s1-ah)"/>
+<path class="skip" d="M456 176 V238" marker-end="url(#s1-ah)"/>
+<path class="skip" d="M440 195 V219" marker-end="url(#s1-ah)"/>
+<text class="t-small" x="425" y="328" text-anchor="middle">voxel 0.005</text>
+</g>
+<path id="s1-e-lit-head" class="edge" data-s="2" d="M520 200 H566" marker-end="url(#s1-ah)"/>
+<g data-s="2">
+<rect class="frame" x="570" y="110" width="170" height="180" rx="14"/>
+<text class="t-title" x="584" y="135">Per-point head</text>
+<text x="714" y="136" font-size="17"><title>trained</title>🔥</text>
+<rect class="blk" x="586" y="146" width="138" height="26" fill="#7ed957"/>
+<text class="t-blk dark" x="655.0" y="163.0" text-anchor="middle">scale · 3</text>
+<rect class="blk" x="586" y="180" width="138" height="26" fill="#7ed957"/>
+<text class="t-blk dark" x="655.0" y="197.0" text-anchor="middle">rotation · 4</text>
+<rect class="blk" x="586" y="214" width="138" height="26" fill="#7ed957"/>
+<text class="t-blk dark" x="655.0" y="231.0" text-anchor="middle">opacity · 1</text>
+<rect class="blk" x="586" y="248" width="138" height="26" fill="#7ed957"/>
+<text class="t-blk dark" x="655.0" y="265.0" text-anchor="middle">SH colour · 48</text>
+</g>
+<path id="s1-e-head-gs" class="edge" data-s="3" d="M740 200 H796" marker-end="url(#s1-ah)"/>
+<g data-s="3">
+<text class="t-io" x="910" y="52" text-anchor="middle">Gaussians</text>
+<g filter="url(#s1-blur-sm)">
+<g transform="translate(876.2 280.4) rotate(-29)"><ellipse class="pop" style="--d:0.11s" rx="11.3" ry="5.3" fill="#9b8068" fill-opacity="0.75"/></g>
+<g transform="translate(943.1 271.5) rotate(41)"><ellipse class="pop" style="--d:0.14s" rx="9.4" ry="5.3" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(867.7 281.7) rotate(-7)"><ellipse class="pop" style="--d:0.11s" rx="6.8" ry="2.9" fill="#9b8068" fill-opacity="0.75"/></g>
+<g transform="translate(868.9 276.9) rotate(-51)"><ellipse class="pop" style="--d:0.12s" rx="6.4" ry="3.2" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(868.1 272.2) rotate(48)"><ellipse class="pop" style="--d:0.14s" rx="10.0" ry="4.9" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(916.7 271.9) rotate(19)"><ellipse class="pop" style="--d:0.14s" rx="6.9" ry="4.6" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(917.5 290.2) rotate(56)"><ellipse class="pop" style="--d:0.07s" rx="6.9" ry="5.1" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(900.6 288.5) rotate(-12)"><ellipse class="pop" style="--d:0.08s" rx="7.3" ry="5.4" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(946.9 271.5) rotate(40)"><ellipse class="pop" style="--d:0.14s" rx="8.9" ry="5.5" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(913.8 283.4) rotate(2)"><ellipse class="pop" style="--d:0.10s" rx="7.0" ry="3.8" fill="#9b8068" fill-opacity="0.75"/></g>
+<g transform="translate(940.7 279.9) rotate(-22)"><ellipse class="pop" style="--d:0.11s" rx="8.0" ry="3.1" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(917.2 273.3) rotate(6)"><ellipse class="pop" style="--d:0.14s" rx="10.3" ry="2.6" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(914.6 281.9) rotate(-20)"><ellipse class="pop" style="--d:0.11s" rx="8.6" ry="2.6" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(920.9 288.1) rotate(-52)"><ellipse class="pop" style="--d:0.08s" rx="9.7" ry="4.0" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(903.6 291.8) rotate(57)"><ellipse class="pop" style="--d:0.07s" rx="11.9" ry="4.9" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(949.6 284.9) rotate(-55)"><ellipse class="pop" style="--d:0.09s" rx="6.6" ry="3.3" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(908.8 268.0) rotate(-44)"><ellipse class="pop" style="--d:0.16s" rx="10.7" ry="3.3" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(913.9 260.7) rotate(38)"><ellipse class="pop" style="--d:0.18s" rx="8.5" ry="5.2" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(912.7 253.5) rotate(50)"><ellipse class="pop" style="--d:0.21s" rx="7.6" ry="2.9" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(917.5 246.2) rotate(-49)"><ellipse class="pop" style="--d:0.24s" rx="9.4" ry="4.6" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(920.2 238.9) rotate(-9)"><ellipse class="pop" style="--d:0.27s" rx="6.3" ry="4.6" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(920.4 231.6) rotate(16)"><ellipse class="pop" style="--d:0.29s" rx="6.4" ry="5.3" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(917.7 224.4) rotate(43)"><ellipse class="pop" style="--d:0.32s" rx="10.8" ry="2.8" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(917.4 217.1) rotate(-6)"><ellipse class="pop" style="--d:0.35s" rx="6.4" ry="5.1" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(916.1 209.8) rotate(51)"><ellipse class="pop" style="--d:0.38s" rx="8.0" ry="4.2" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(915.9 202.5) rotate(3)"><ellipse class="pop" style="--d:0.40s" rx="7.6" ry="2.9" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(915.6 195.3) rotate(-41)"><ellipse class="pop" style="--d:0.43s" rx="7.4" ry="2.8" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(910.5 188.0) rotate(-23)"><ellipse class="pop" style="--d:0.46s" rx="6.3" ry="3.1" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(846.5 171.9) rotate(-25)"><ellipse class="pop" style="--d:0.52s" rx="7.8" ry="4.8" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(877.4 185.0) rotate(-18)"><ellipse class="pop" style="--d:0.47s" rx="9.0" ry="3.0" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(840.7 185.1) rotate(-58)"><ellipse class="pop" style="--d:0.47s" rx="6.1" ry="3.3" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(865.8 168.8) rotate(-37)"><ellipse class="pop" style="--d:0.53s" rx="10.4" ry="4.2" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(898.8 181.1) rotate(-47)"><ellipse class="pop" style="--d:0.48s" rx="8.8" ry="5.3" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(861.3 160.1) rotate(-1)"><ellipse class="pop" style="--d:0.56s" rx="10.9" ry="3.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(890.9 184.3) rotate(1)"><ellipse class="pop" style="--d:0.47s" rx="11.0" ry="3.7" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(849.7 171.3) rotate(-19)"><ellipse class="pop" style="--d:0.52s" rx="10.1" ry="5.4" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(869.4 173.5) rotate(16)"><ellipse class="pop" style="--d:0.51s" rx="11.0" ry="4.6" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(841.9 195.6) rotate(-53)"><ellipse class="pop" style="--d:0.43s" rx="8.4" ry="3.5" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(887.9 189.7) rotate(29)"><ellipse class="pop" style="--d:0.45s" rx="6.8" ry="2.7" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(865.8 190.7) rotate(-50)"><ellipse class="pop" style="--d:0.45s" rx="7.5" ry="3.0" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(879.8 172.5) rotate(20)"><ellipse class="pop" style="--d:0.52s" rx="11.0" ry="5.1" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(896.0 180.3) rotate(-25)"><ellipse class="pop" style="--d:0.49s" rx="7.7" ry="3.2" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(880.7 179.6) rotate(-7)"><ellipse class="pop" style="--d:0.49s" rx="8.8" ry="3.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(884.0 197.7) rotate(57)"><ellipse class="pop" style="--d:0.42s" rx="7.6" ry="5.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(842.0 183.7) rotate(56)"><ellipse class="pop" style="--d:0.47s" rx="9.3" ry="3.2" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(865.4 190.9) rotate(-60)"><ellipse class="pop" style="--d:0.45s" rx="7.9" ry="3.6" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(850.6 195.1) rotate(0)"><ellipse class="pop" style="--d:0.43s" rx="8.3" ry="3.9" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(859.1 166.1) rotate(-59)"><ellipse class="pop" style="--d:0.54s" rx="7.2" ry="4.0" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(851.6 165.1) rotate(-12)"><ellipse class="pop" style="--d:0.54s" rx="7.6" ry="2.8" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(892.2 169.6) rotate(-23)"><ellipse class="pop" style="--d:0.53s" rx="6.3" ry="2.6" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(935.2 181.4) rotate(4)"><ellipse class="pop" style="--d:0.48s" rx="7.4" ry="4.3" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(930.6 173.7) rotate(26)"><ellipse class="pop" style="--d:0.51s" rx="10.5" ry="4.5" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(966.2 176.5) rotate(-21)"><ellipse class="pop" style="--d:0.50s" rx="11.3" ry="3.7" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(972.3 183.8) rotate(27)"><ellipse class="pop" style="--d:0.47s" rx="11.9" ry="2.9" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(965.2 172.0) rotate(40)"><ellipse class="pop" style="--d:0.52s" rx="9.9" ry="2.6" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(977.3 166.1) rotate(28)"><ellipse class="pop" style="--d:0.54s" rx="11.4" ry="4.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(970.8 158.8) rotate(3)"><ellipse class="pop" style="--d:0.57s" rx="10.9" ry="2.9" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(929.9 154.6) rotate(37)"><ellipse class="pop" style="--d:0.58s" rx="9.0" ry="5.0" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(944.2 178.3) rotate(47)"><ellipse class="pop" style="--d:0.49s" rx="11.0" ry="4.3" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(975.2 171.3) rotate(-32)"><ellipse class="pop" style="--d:0.52s" rx="10.1" ry="4.6" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(947.1 180.4) rotate(-17)"><ellipse class="pop" style="--d:0.49s" rx="6.2" ry="2.9" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(950.6 155.6) rotate(7)"><ellipse class="pop" style="--d:0.58s" rx="6.6" ry="5.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(936.7 170.9) rotate(22)"><ellipse class="pop" style="--d:0.52s" rx="9.8" ry="4.4" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(933.8 187.1) rotate(36)"><ellipse class="pop" style="--d:0.46s" rx="8.9" ry="2.5" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(952.9 159.0) rotate(4)"><ellipse class="pop" style="--d:0.57s" rx="10.5" ry="4.0" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(946.2 160.5) rotate(28)"><ellipse class="pop" style="--d:0.56s" rx="10.0" ry="2.7" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(969.0 164.3) rotate(-28)"><ellipse class="pop" style="--d:0.55s" rx="7.5" ry="2.7" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(922.6 167.7) rotate(29)"><ellipse class="pop" style="--d:0.53s" rx="10.4" ry="3.1" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(934.6 157.9) rotate(-14)"><ellipse class="pop" style="--d:0.57s" rx="11.9" ry="4.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(962.6 151.8) rotate(32)"><ellipse class="pop" style="--d:0.59s" rx="8.9" ry="4.6" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(959.4 187.9) rotate(-51)"><ellipse class="pop" style="--d:0.46s" rx="9.7" ry="4.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(982.2 170.6) rotate(29)"><ellipse class="pop" style="--d:0.52s" rx="6.9" ry="3.3" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(908.3 156.9) rotate(-59)"><ellipse class="pop" style="--d:0.57s" rx="7.8" ry="4.2" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(877.1 143.9) rotate(21)"><ellipse class="pop" style="--d:0.62s" rx="6.4" ry="3.3" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(930.9 131.8) rotate(-25)"><ellipse class="pop" style="--d:0.67s" rx="10.2" ry="4.5" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(929.8 146.3) rotate(-4)"><ellipse class="pop" style="--d:0.61s" rx="9.1" ry="3.9" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(918.0 155.1) rotate(-36)"><ellipse class="pop" style="--d:0.58s" rx="6.7" ry="5.2" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(923.4 121.3) rotate(-58)"><ellipse class="pop" style="--d:0.71s" rx="11.9" ry="5.3" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(913.2 129.0) rotate(56)"><ellipse class="pop" style="--d:0.68s" rx="8.8" ry="5.0" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(936.9 124.0) rotate(-35)"><ellipse class="pop" style="--d:0.70s" rx="8.7" ry="3.3" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(894.9 137.5) rotate(10)"><ellipse class="pop" style="--d:0.65s" rx="11.7" ry="3.1" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(939.9 148.7) rotate(54)"><ellipse class="pop" style="--d:0.60s" rx="6.9" ry="4.1" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(879.8 141.0) rotate(1)"><ellipse class="pop" style="--d:0.63s" rx="6.8" ry="5.0" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(907.7 125.7) rotate(-32)"><ellipse class="pop" style="--d:0.69s" rx="11.3" ry="4.6" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(937.3 139.3) rotate(-57)"><ellipse class="pop" style="--d:0.64s" rx="11.4" ry="4.0" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(914.8 127.0) rotate(-6)"><ellipse class="pop" style="--d:0.69s" rx="6.0" ry="4.0" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(939.0 133.5) rotate(-19)"><ellipse class="pop" style="--d:0.66s" rx="7.8" ry="2.9" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(924.9 151.5) rotate(-60)"><ellipse class="pop" style="--d:0.59s" rx="7.9" ry="5.0" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(945.3 138.2) rotate(-46)"><ellipse class="pop" style="--d:0.64s" rx="10.5" ry="5.0" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(875.7 132.0) rotate(48)"><ellipse class="pop" style="--d:0.67s" rx="11.6" ry="4.6" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(925.8 135.1) rotate(-13)"><ellipse class="pop" style="--d:0.66s" rx="7.7" ry="3.6" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(926.3 138.0) rotate(-17)"><ellipse class="pop" style="--d:0.64s" rx="12.0" ry="4.3" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(911.6 155.3) rotate(-54)"><ellipse class="pop" style="--d:0.58s" rx="8.6" ry="3.3" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(878.4 129.7) rotate(-26)"><ellipse class="pop" style="--d:0.68s" rx="6.6" ry="5.0" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(928.1 128.0) rotate(-28)"><ellipse class="pop" style="--d:0.68s" rx="11.6" ry="3.2" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(893.0 116.6) rotate(-15)"><ellipse class="pop" style="--d:0.73s" rx="9.1" ry="3.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(888.1 198.3) rotate(37)"><ellipse class="pop" style="--d:0.42s" rx="11.7" ry="5.2" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(916.9 195.2) rotate(53)"><ellipse class="pop" style="--d:0.43s" rx="9.8" ry="5.2" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(927.1 191.4) rotate(-54)"><ellipse class="pop" style="--d:0.44s" rx="9.3" ry="4.7" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(892.2 179.9) rotate(30)"><ellipse class="pop" style="--d:0.49s" rx="10.4" ry="3.9" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(918.4 201.1) rotate(-54)"><ellipse class="pop" style="--d:0.41s" rx="9.9" ry="3.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(896.1 186.4) rotate(-3)"><ellipse class="pop" style="--d:0.46s" rx="11.6" ry="2.9" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(892.3 187.6) rotate(29)"><ellipse class="pop" style="--d:0.46s" rx="8.1" ry="3.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(914.6 187.1) rotate(19)"><ellipse class="pop" style="--d:0.46s" rx="11.9" ry="3.3" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(906.2 205.8) rotate(-13)"><ellipse class="pop" style="--d:0.39s" rx="7.8" ry="4.2" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(905.9 190.9) rotate(-35)"><ellipse class="pop" style="--d:0.45s" rx="7.0" ry="3.0" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(890.9 195.0) rotate(-34)"><ellipse class="pop" style="--d:0.43s" rx="11.4" ry="4.0" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(900.9 185.0) rotate(-6)"><ellipse class="pop" style="--d:0.47s" rx="11.4" ry="5.5" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(891.9 193.9) rotate(-49)"><ellipse class="pop" style="--d:0.44s" rx="6.8" ry="3.1" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(897.1 189.6) rotate(-31)"><ellipse class="pop" style="--d:0.45s" rx="8.1" ry="2.8" fill="#4cb874" fill-opacity="0.75"/></g>
+</g>
+<path class="fixed" d="M140 36 V22 H910 V36" marker-end="url(#s1-ah)"/>
+<text class="t-small" x="525" y="16" text-anchor="middle">means: fixed input, copied as is (not learned)</text>
+</g>
+<path id="s1-e-gs-rast" class="edge" data-s="4" d="M910 334 V370" marker-end="url(#s1-ah)"/>
+<path id="s1-e-rast-img" class="edge" data-s="4" d="M840 395 H756" marker-end="url(#s1-ah)"/>
+<path id="s1-e-img-loss" class="edge" data-s="4" d="M695 430 V452 H365 V419" marker-end="url(#s1-ah)"/>
+<path id="s1-e-gt-loss" class="edge" data-s="4" d="M480 397 H434" marker-end="url(#s1-ah)"/>
+<g data-s="4">
+<rect class="frame" x="840" y="374" width="140" height="42" rx="10"/>
+<text class="t-blk" x="910" y="399" text-anchor="middle">gsplat rasterizer</text>
+<rect x="640" y="362" width="112" height="68" rx="5" fill="#e9e6df" stroke="#1d1d1f" stroke-width="1"/>
+<g filter="url(#s1-blur)">
+<g transform="translate(691.9 420.8) rotate(-29)"><ellipse rx="3.0" ry="1.4" fill="#9b8068" fill-opacity="0.75"/></g>
+<g transform="translate(709.9 418.4) rotate(41)"><ellipse rx="2.5" ry="1.4" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(689.6 421.2) rotate(-7)"><ellipse rx="1.8" ry="0.8" fill="#9b8068" fill-opacity="0.75"/></g>
+<g transform="translate(689.9 419.9) rotate(-51)"><ellipse rx="1.7" ry="0.9" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(689.7 418.6) rotate(48)"><ellipse rx="2.7" ry="1.3" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(702.8 418.5) rotate(19)"><ellipse rx="1.9" ry="1.3" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(703.0 423.4) rotate(56)"><ellipse rx="1.9" ry="1.4" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(698.5 423.0) rotate(-12)"><ellipse rx="2.0" ry="1.4" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(711.0 418.4) rotate(40)"><ellipse rx="2.4" ry="1.5" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(702.0 421.6) rotate(2)"><ellipse rx="1.9" ry="1.0" fill="#9b8068" fill-opacity="0.75"/></g>
+<g transform="translate(709.3 420.7) rotate(-22)"><ellipse rx="2.2" ry="0.8" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(703.0 418.9) rotate(6)"><ellipse rx="2.8" ry="0.7" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(702.2 421.2) rotate(-20)"><ellipse rx="2.3" ry="0.7" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(703.9 422.9) rotate(-52)"><ellipse rx="2.6" ry="1.1" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(699.3 423.9) rotate(57)"><ellipse rx="3.2" ry="1.3" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(711.7 422.0) rotate(-55)"><ellipse rx="1.8" ry="0.9" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(700.7 417.5) rotate(-44)"><ellipse rx="2.9" ry="0.9" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(702.0 415.5) rotate(38)"><ellipse rx="2.3" ry="1.4" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(701.7 413.5) rotate(50)"><ellipse rx="2.0" ry="0.8" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(703.0 411.6) rotate(-49)"><ellipse rx="2.5" ry="1.2" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(703.8 409.6) rotate(-9)"><ellipse rx="1.7" ry="1.2" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(703.8 407.6) rotate(16)"><ellipse rx="1.7" ry="1.4" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(703.1 405.7) rotate(43)"><ellipse rx="2.9" ry="0.7" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(703.0 403.7) rotate(-6)"><ellipse rx="1.7" ry="1.4" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(702.6 401.8) rotate(51)"><ellipse rx="2.2" ry="1.1" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(702.6 399.8) rotate(3)"><ellipse rx="2.1" ry="0.8" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(702.5 397.8) rotate(-41)"><ellipse rx="2.0" ry="0.8" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(701.1 395.9) rotate(-23)"><ellipse rx="1.7" ry="0.8" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(683.9 391.5) rotate(-25)"><ellipse rx="2.1" ry="1.3" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(692.2 395.1) rotate(-18)"><ellipse rx="2.4" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(682.3 395.1) rotate(-58)"><ellipse rx="1.6" ry="0.9" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(689.1 390.7) rotate(-37)"><ellipse rx="2.8" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(698.0 394.0) rotate(-47)"><ellipse rx="2.4" ry="1.4" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(687.9 388.3) rotate(-1)"><ellipse rx="2.9" ry="1.0" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(695.8 394.9) rotate(1)"><ellipse rx="3.0" ry="1.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(684.7 391.3) rotate(-19)"><ellipse rx="2.7" ry="1.5" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(690.0 391.9) rotate(16)"><ellipse rx="3.0" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(682.6 397.9) rotate(-53)"><ellipse rx="2.3" ry="1.0" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(695.0 396.3) rotate(29)"><ellipse rx="1.8" ry="0.7" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(689.1 396.6) rotate(-50)"><ellipse rx="2.0" ry="0.8" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(692.8 391.7) rotate(20)"><ellipse rx="3.0" ry="1.4" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(697.2 393.8) rotate(-25)"><ellipse rx="2.1" ry="0.9" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(693.1 393.6) rotate(-7)"><ellipse rx="2.4" ry="0.8" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(694.0 398.5) rotate(57)"><ellipse rx="2.0" ry="1.5" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(682.6 394.7) rotate(56)"><ellipse rx="2.5" ry="0.9" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(689.0 396.6) rotate(-60)"><ellipse rx="2.1" ry="1.0" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(685.0 397.8) rotate(0)"><ellipse rx="2.2" ry="1.1" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(687.3 389.9) rotate(-59)"><ellipse rx="1.9" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(685.2 389.7) rotate(-12)"><ellipse rx="2.0" ry="0.7" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(696.2 390.9) rotate(-23)"><ellipse rx="1.7" ry="0.7" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(707.8 394.1) rotate(4)"><ellipse rx="2.0" ry="1.1" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(706.6 392.0) rotate(26)"><ellipse rx="2.8" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(716.2 392.7) rotate(-21)"><ellipse rx="3.0" ry="1.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(717.8 394.7) rotate(27)"><ellipse rx="3.2" ry="0.8" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(715.9 391.5) rotate(40)"><ellipse rx="2.7" ry="0.7" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(719.2 390.0) rotate(28)"><ellipse rx="3.1" ry="1.2" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(717.4 388.0) rotate(3)"><ellipse rx="2.9" ry="0.8" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(706.4 386.8) rotate(37)"><ellipse rx="2.4" ry="1.4" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(710.2 393.2) rotate(47)"><ellipse rx="3.0" ry="1.1" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(718.6 391.3) rotate(-32)"><ellipse rx="2.7" ry="1.2" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(711.0 393.8) rotate(-17)"><ellipse rx="1.7" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(712.0 387.1) rotate(7)"><ellipse rx="1.8" ry="1.4" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(708.2 391.2) rotate(22)"><ellipse rx="2.6" ry="1.2" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(707.4 395.6) rotate(36)"><ellipse rx="2.4" ry="0.7" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(712.6 388.0) rotate(4)"><ellipse rx="2.8" ry="1.1" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(710.8 388.4) rotate(28)"><ellipse rx="2.7" ry="0.7" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(716.9 389.5) rotate(-28)"><ellipse rx="2.0" ry="0.7" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(704.4 390.4) rotate(29)"><ellipse rx="2.8" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(707.6 387.7) rotate(-14)"><ellipse rx="3.2" ry="1.1" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(715.2 386.1) rotate(32)"><ellipse rx="2.4" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(714.3 395.8) rotate(-51)"><ellipse rx="2.6" ry="1.2" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(720.5 391.2) rotate(29)"><ellipse rx="1.9" ry="0.9" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(700.5 387.5) rotate(-59)"><ellipse rx="2.1" ry="1.1" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(692.1 384.0) rotate(21)"><ellipse rx="1.7" ry="0.9" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(706.6 380.7) rotate(-25)"><ellipse rx="2.7" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(706.3 384.6) rotate(-4)"><ellipse rx="2.5" ry="1.1" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(703.2 387.0) rotate(-36)"><ellipse rx="1.8" ry="1.4" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(704.6 377.8) rotate(-58)"><ellipse rx="3.2" ry="1.4" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(701.9 379.9) rotate(56)"><ellipse rx="2.4" ry="1.3" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(708.3 378.6) rotate(-35)"><ellipse rx="2.3" ry="0.9" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(696.9 382.2) rotate(10)"><ellipse rx="3.2" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(709.1 385.3) rotate(54)"><ellipse rx="1.8" ry="1.1" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(692.8 383.2) rotate(1)"><ellipse rx="1.8" ry="1.3" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(700.4 379.0) rotate(-32)"><ellipse rx="3.1" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(708.4 382.7) rotate(-57)"><ellipse rx="3.1" ry="1.1" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(702.3 379.4) rotate(-6)"><ellipse rx="1.6" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(708.8 381.1) rotate(-19)"><ellipse rx="2.1" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(705.0 386.0) rotate(-60)"><ellipse rx="2.1" ry="1.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(710.5 382.4) rotate(-46)"><ellipse rx="2.8" ry="1.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(691.7 380.7) rotate(48)"><ellipse rx="3.1" ry="1.3" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(705.3 381.6) rotate(-13)"><ellipse rx="2.1" ry="1.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(705.4 382.4) rotate(-17)"><ellipse rx="3.2" ry="1.2" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(701.4 387.0) rotate(-54)"><ellipse rx="2.3" ry="0.9" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(692.5 380.1) rotate(-26)"><ellipse rx="1.8" ry="1.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(705.9 379.7) rotate(-28)"><ellipse rx="3.1" ry="0.9" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(696.4 376.6) rotate(-15)"><ellipse rx="2.4" ry="0.8" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(695.1 398.7) rotate(37)"><ellipse rx="3.2" ry="1.4" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(702.9 397.8) rotate(53)"><ellipse rx="2.6" ry="1.4" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(705.6 396.8) rotate(-54)"><ellipse rx="2.5" ry="1.3" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(696.2 393.7) rotate(30)"><ellipse rx="2.8" ry="1.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(703.3 399.4) rotate(-54)"><ellipse rx="2.7" ry="0.9" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(697.2 395.4) rotate(-3)"><ellipse rx="3.1" ry="0.8" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(696.2 395.7) rotate(29)"><ellipse rx="2.2" ry="0.9" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(702.2 395.6) rotate(19)"><ellipse rx="3.2" ry="0.9" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(700.0 400.7) rotate(-13)"><ellipse rx="2.1" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(699.9 396.6) rotate(-35)"><ellipse rx="1.9" ry="0.8" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(695.9 397.7) rotate(-34)"><ellipse rx="3.1" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(698.5 395.0) rotate(-6)"><ellipse rx="3.1" ry="1.5" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(696.1 397.5) rotate(-49)"><ellipse rx="1.8" ry="0.8" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(697.5 396.3) rotate(-31)"><ellipse rx="2.2" ry="0.7" fill="#4cb874" fill-opacity="0.75"/></g>
+</g>
+<text class="t-small" x="696" y="352" text-anchor="middle">rendered</text>
+<rect x="482" y="362" width="112" height="68" rx="5" fill="#e9e6df" stroke="#1d1d1f" stroke-width="1"/>
+<g>
+<g transform="translate(533.9 420.8) rotate(-29)"><ellipse rx="3.0" ry="1.4" fill="#9b8068" fill-opacity="0.75"/></g>
+<g transform="translate(551.9 418.4) rotate(41)"><ellipse rx="2.5" ry="1.4" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(531.6 421.2) rotate(-7)"><ellipse rx="1.8" ry="0.8" fill="#9b8068" fill-opacity="0.75"/></g>
+<g transform="translate(531.9 419.9) rotate(-51)"><ellipse rx="1.7" ry="0.9" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(531.7 418.6) rotate(48)"><ellipse rx="2.7" ry="1.3" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(544.8 418.5) rotate(19)"><ellipse rx="1.9" ry="1.3" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(545.0 423.4) rotate(56)"><ellipse rx="1.9" ry="1.4" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(540.5 423.0) rotate(-12)"><ellipse rx="2.0" ry="1.4" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(553.0 418.4) rotate(40)"><ellipse rx="2.4" ry="1.5" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(544.0 421.6) rotate(2)"><ellipse rx="1.9" ry="1.0" fill="#9b8068" fill-opacity="0.75"/></g>
+<g transform="translate(551.3 420.7) rotate(-22)"><ellipse rx="2.2" ry="0.8" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(545.0 418.9) rotate(6)"><ellipse rx="2.8" ry="0.7" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(544.2 421.2) rotate(-20)"><ellipse rx="2.3" ry="0.7" fill="#8a6f5a" fill-opacity="0.75"/></g>
+<g transform="translate(545.9 422.9) rotate(-52)"><ellipse rx="2.6" ry="1.1" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(541.3 423.9) rotate(57)"><ellipse rx="3.2" ry="1.3" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(553.7 422.0) rotate(-55)"><ellipse rx="1.8" ry="0.9" fill="#6d5a4b" fill-opacity="0.75"/></g>
+<g transform="translate(542.7 417.5) rotate(-44)"><ellipse rx="2.9" ry="0.9" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(544.0 415.5) rotate(38)"><ellipse rx="2.3" ry="1.4" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(543.7 413.5) rotate(50)"><ellipse rx="2.0" ry="0.8" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(545.0 411.6) rotate(-49)"><ellipse rx="2.5" ry="1.2" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(545.8 409.6) rotate(-9)"><ellipse rx="1.7" ry="1.2" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(545.8 407.6) rotate(16)"><ellipse rx="1.7" ry="1.4" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(545.1 405.7) rotate(43)"><ellipse rx="2.9" ry="0.7" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(545.0 403.7) rotate(-6)"><ellipse rx="1.7" ry="1.4" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(544.6 401.8) rotate(51)"><ellipse rx="2.2" ry="1.1" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(544.6 399.8) rotate(3)"><ellipse rx="2.1" ry="0.8" fill="#5b4636" fill-opacity="0.75"/></g>
+<g transform="translate(544.5 397.8) rotate(-41)"><ellipse rx="2.0" ry="0.8" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(543.1 395.9) rotate(-23)"><ellipse rx="1.7" ry="0.8" fill="#6e543f" fill-opacity="0.75"/></g>
+<g transform="translate(525.9 391.5) rotate(-25)"><ellipse rx="2.1" ry="1.3" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(534.2 395.1) rotate(-18)"><ellipse rx="2.4" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(524.3 395.1) rotate(-58)"><ellipse rx="1.6" ry="0.9" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(531.1 390.7) rotate(-37)"><ellipse rx="2.8" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(540.0 394.0) rotate(-47)"><ellipse rx="2.4" ry="1.4" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(529.9 388.3) rotate(-1)"><ellipse rx="2.9" ry="1.0" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(537.8 394.9) rotate(1)"><ellipse rx="3.0" ry="1.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(526.7 391.3) rotate(-19)"><ellipse rx="2.7" ry="1.5" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(532.0 391.9) rotate(16)"><ellipse rx="3.0" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(524.6 397.9) rotate(-53)"><ellipse rx="2.3" ry="1.0" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(537.0 396.3) rotate(29)"><ellipse rx="1.8" ry="0.7" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(531.1 396.6) rotate(-50)"><ellipse rx="2.0" ry="0.8" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(534.8 391.7) rotate(20)"><ellipse rx="3.0" ry="1.4" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(539.2 393.8) rotate(-25)"><ellipse rx="2.1" ry="0.9" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(535.1 393.6) rotate(-7)"><ellipse rx="2.4" ry="0.8" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(536.0 398.5) rotate(57)"><ellipse rx="2.0" ry="1.5" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(524.6 394.7) rotate(56)"><ellipse rx="2.5" ry="0.9" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(531.0 396.6) rotate(-60)"><ellipse rx="2.1" ry="1.0" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(527.0 397.8) rotate(0)"><ellipse rx="2.2" ry="1.1" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(529.3 389.9) rotate(-59)"><ellipse rx="1.9" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(527.2 389.7) rotate(-12)"><ellipse rx="2.0" ry="0.7" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(538.2 390.9) rotate(-23)"><ellipse rx="1.7" ry="0.7" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(549.8 394.1) rotate(4)"><ellipse rx="2.0" ry="1.1" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(548.6 392.0) rotate(26)"><ellipse rx="2.8" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(558.2 392.7) rotate(-21)"><ellipse rx="3.0" ry="1.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(559.8 394.7) rotate(27)"><ellipse rx="3.2" ry="0.8" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(557.9 391.5) rotate(40)"><ellipse rx="2.7" ry="0.7" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(561.2 390.0) rotate(28)"><ellipse rx="3.1" ry="1.2" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(559.4 388.0) rotate(3)"><ellipse rx="2.9" ry="0.8" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(548.4 386.8) rotate(37)"><ellipse rx="2.4" ry="1.4" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(552.2 393.2) rotate(47)"><ellipse rx="3.0" ry="1.1" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(560.6 391.3) rotate(-32)"><ellipse rx="2.7" ry="1.2" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(553.0 393.8) rotate(-17)"><ellipse rx="1.7" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(554.0 387.1) rotate(7)"><ellipse rx="1.8" ry="1.4" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(550.2 391.2) rotate(22)"><ellipse rx="2.6" ry="1.2" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(549.4 395.6) rotate(36)"><ellipse rx="2.4" ry="0.7" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(554.6 388.0) rotate(4)"><ellipse rx="2.8" ry="1.1" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(552.8 388.4) rotate(28)"><ellipse rx="2.7" ry="0.7" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(558.9 389.5) rotate(-28)"><ellipse rx="2.0" ry="0.7" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(546.4 390.4) rotate(29)"><ellipse rx="2.8" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(549.6 387.7) rotate(-14)"><ellipse rx="3.2" ry="1.1" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(557.2 386.1) rotate(32)"><ellipse rx="2.4" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(556.3 395.8) rotate(-51)"><ellipse rx="2.6" ry="1.2" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(562.5 391.2) rotate(29)"><ellipse rx="1.9" ry="0.9" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(542.5 387.5) rotate(-59)"><ellipse rx="2.1" ry="1.1" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(534.1 384.0) rotate(21)"><ellipse rx="1.7" ry="0.9" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(548.6 380.7) rotate(-25)"><ellipse rx="2.7" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(548.3 384.6) rotate(-4)"><ellipse rx="2.5" ry="1.1" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(545.2 387.0) rotate(-36)"><ellipse rx="1.8" ry="1.4" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(546.6 377.8) rotate(-58)"><ellipse rx="3.2" ry="1.4" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(543.9 379.9) rotate(56)"><ellipse rx="2.4" ry="1.3" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(550.3 378.6) rotate(-35)"><ellipse rx="2.3" ry="0.9" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(538.9 382.2) rotate(10)"><ellipse rx="3.2" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(551.1 385.3) rotate(54)"><ellipse rx="1.8" ry="1.1" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(534.8 383.2) rotate(1)"><ellipse rx="1.8" ry="1.3" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(542.4 379.0) rotate(-32)"><ellipse rx="3.1" ry="1.2" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(550.4 382.7) rotate(-57)"><ellipse rx="3.1" ry="1.1" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(544.3 379.4) rotate(-6)"><ellipse rx="1.6" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(550.8 381.1) rotate(-19)"><ellipse rx="2.1" ry="0.8" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(547.0 386.0) rotate(-60)"><ellipse rx="2.1" ry="1.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(552.5 382.4) rotate(-46)"><ellipse rx="2.8" ry="1.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(533.7 380.7) rotate(48)"><ellipse rx="3.1" ry="1.3" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(547.3 381.6) rotate(-13)"><ellipse rx="2.1" ry="1.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(547.4 382.4) rotate(-17)"><ellipse rx="3.2" ry="1.2" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(543.4 387.0) rotate(-54)"><ellipse rx="2.3" ry="0.9" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(534.5 380.1) rotate(-26)"><ellipse rx="1.8" ry="1.4" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(547.9 379.7) rotate(-28)"><ellipse rx="3.1" ry="0.9" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(538.4 376.6) rotate(-15)"><ellipse rx="2.4" ry="0.8" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(537.1 398.7) rotate(37)"><ellipse rx="3.2" ry="1.4" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(544.9 397.8) rotate(53)"><ellipse rx="2.6" ry="1.4" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(547.6 396.8) rotate(-54)"><ellipse rx="2.5" ry="1.3" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(538.2 393.7) rotate(30)"><ellipse rx="2.8" ry="1.0" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(545.3 399.4) rotate(-54)"><ellipse rx="2.7" ry="0.9" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(539.2 395.4) rotate(-3)"><ellipse rx="3.1" ry="0.8" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(538.2 395.7) rotate(29)"><ellipse rx="2.2" ry="0.9" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(544.2 395.6) rotate(19)"><ellipse rx="3.2" ry="0.9" fill="#3aa36a" fill-opacity="0.75"/></g>
+<g transform="translate(542.0 400.7) rotate(-13)"><ellipse rx="2.1" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(541.9 396.6) rotate(-35)"><ellipse rx="1.9" ry="0.8" fill="#2f8f5b" fill-opacity="0.75"/></g>
+<g transform="translate(537.9 397.7) rotate(-34)"><ellipse rx="3.1" ry="1.1" fill="#4cb874" fill-opacity="0.75"/></g>
+<g transform="translate(540.5 395.0) rotate(-6)"><ellipse rx="3.1" ry="1.5" fill="#57c27f" fill-opacity="0.75"/></g>
+<g transform="translate(538.1 397.5) rotate(-49)"><ellipse rx="1.8" ry="0.8" fill="#1f7a4a" fill-opacity="0.75"/></g>
+<g transform="translate(539.5 396.3) rotate(-31)"><ellipse rx="2.2" ry="0.7" fill="#4cb874" fill-opacity="0.75"/></g>
+</g>
+<text class="t-small" x="538" y="352" text-anchor="middle">ground truth</text>
+<rect class="frame" x="300" y="377" width="134" height="40" rx="10"/>
+<text class="t-blk" x="367" y="401" text-anchor="middle">L1 + SSIM (λ 0.2)</text>
+</g>
+<path id="s1-e-back" class="edge back" data-s="5" d="M330 377 V340 H392 V314" marker-end="url(#s1-ah-acc)"/>
+<g data-s="5">
+<text class="t-small back-t" x="290" y="394" text-anchor="end">gradients update</text><text class="t-small back-t" x="290" y="408" text-anchor="end">only the network</text>
+<text class="t-io" x="40" y="440">bonsai, 10k steps: <tspan font-weight="600" class="acc">28.75 dB</tspan> <tspan class="t-small">(MCMC 32.80)</tspan></text>
+</g>
+</svg>
+    </div>
+    <div class="fig-panel">
+      <div class="fig-bar">
+        <div class="fig-nav">
+          <button type="button" class="fig-prev" aria-label="Previous step">←</button>
+          <button type="button" class="fig-play">Pause</button>
+          <button type="button" class="fig-next" aria-label="Next step">→</button>
+        </div>
+        <ol class="fig-steps"></ol>
+      </div>
+      <p class="fig-caption" aria-live="polite"></p>
+    </div>
+    <div class="setup">
+      <div class="cell changed"><span class="k">Points</span><span class="v">MCMC means</span></div>
+      <div class="cell changed"><span class="k">Features</span><span class="v">colour (rgb)</span></div>
+      <div class="cell changed"><span class="k">Augmentation</span><span class="v">none</span></div>
+      <div class="cell changed"><span class="k">Scenes</span><span class="v">bonsai</span></div>
+    </div>
+  </figure>
+  <p>Can a point transformer predict the Gaussians of one scene from fixed positions? The input points are the means of a converged MCMC checkpoint (1M points on bonsai) and the only per-point feature is the colour. The network predicts every Gaussian's scale, rotation, opacity and SH colour. Numbers for 003 come from wandb.</p>
+  <p class="step-res"><span class="k">Result</span> bonsai <b>28.75 dB</b> in 10k steps (MCMC: 32.80).</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-001">
+  <div class="kicker">Observation 1 <span class="tag">001–002</span></div>
+  <h2>The point spacing sets the LitePT voxel size</h2>
+  <div class="date">2026-09 · points-per-voxel analysis</div>
+
+  <h3>Change</h3>
+  <p><code>scripts/001_points_per_voxel.py</code> histograms how many Gaussian centres (opacity &gt; 0.005) fall in each voxel of an MCMC checkpoint for a list of voxel sizes; <code>002_points_per_voxel_mipnerf.sh</code> runs it on every Mip-NeRF scene for voxel sizes 0.001–0.1. LitePT's <code>grid_size</code> is the same knob.</p>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>Voxel size 0.005 (normalized scene units) was chosen and kept in every later run.</li>
+    <li>On the four indoor scenes the median nearest-neighbour distance is 0.0010–0.0015, i.e. 2.2–4.1 points per 0.005 voxel (kitchen densest), so one shared voxel size works across them.</li>
+  </ul>
+  <p class="source">The histograms themselves are not on this cluster; the numbers are from the 007 script header.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-003">
+  <div class="kicker">Observation 2 <span class="tag">003</span></div>
+  <h2>A network on MCMC means fits bonsai to 28.75 dB</h2>
+  <div class="date">2026-09-28 · 003 — first training</div>
+
+  <h3>Change</h3>
+  <p><code>scripts/003_train.sh</code>: bonsai (factor 2), input = MCMC means, LitePT voxel 0.005 with BatchNorm (LitePT default) and drop-path 0.3, SH degree 3 (one degree per 1000 steps), init scale 0.01 / opacity 0.1, max scale 1.0, AdamW (5 % warmup, cosine to 1 %), 8 views per step, 10k steps, no augmentation. Two LRs: wandb <code>l4zk2x1q</code> (1e-3) and <code>bqxkf5c7</code> (2e-3).</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>LR 1e-3</th><th>LR 2e-3</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>22.57</td><td>23.71</td></tr>
+      <tr><td>2k</td><td>25.11</td><td>25.70</td></tr>
+      <tr><td>5k</td><td>27.15</td><td>27.37</td></tr>
+      <tr><td>10k</td><td>28.15 / 0.897 / 0.245</td><td class="best">28.75 / 0.902 / 0.237</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>The idea works: from fixed MCMC positions the network reaches 28.75 dB on bonsai in 10k steps, 4 dB below MCMC (32.8). LR 2e-3 is better and became the default.</li>
+    <li>This is the "MCMC means as input reached 28.75" reference quoted later in the log.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="step" id="step2">
+  <div class="label"><span class="step-no">2</span>Step 2 <span class="tag grey">004–006</span></div>
+  <h2>Add augmentation: rotation, scaling, voxel jitter</h2>
+  <figure class="step-anim" id="step2-anim" data-step="2">
+    <div class="setup">
+      <div class="cell"><span class="k">Points</span><span class="v">MCMC means</span></div>
+      <div class="cell"><span class="k">Features</span><span class="v">colour (rgb)</span></div>
+      <div class="cell changed"><span class="k">Augmentation</span><span class="v">rotation · scale · voxel jitter</span></div>
+      <div class="cell"><span class="k">Scenes</span><span class="v">bonsai</span></div>
+    </div>
+  </figure>
+  <p>Same scene, model and inputs as step 1. Every training step the points and cameras get a random rotation (±180° about z, ±5° about x and y) and a uniform scale (log-uniform in 0.8–1.25), and LitePT's grid a random sub-voxel shift. 004 also mirrored x with probability 0.5; 005 removed that. Eval is unaugmented. Numbers from wandb.</p>
+  <p class="step-res"><span class="k">Result</span> eval collapses with BatchNorm; LayerNorm fixes it: bonsai <b>23.39 dB</b>.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-004">
+  <div class="kicker">Observation 3 <span class="tag">004</span></div>
+  <h2>Augmentation makes eval collapse</h2>
+  <div class="date">2026-10-05 · 004 — scene augmentation</div>
+
+  <h3>Change</h3>
+  <p>003 + train-time scene augmentation (<code>data/augment.py</code>), one draw per step: rotation about z (±180°) plus tilt (±5°), x-mirror (p = 0.5), log-uniform scale 0.8–1.25 of points and cameras, and a random sub-voxel shift of LitePT's grid. Eval is not augmented. 20k steps. <code>scripts/004_train_augment.sh</code>, wandb <code>7qlj0yr1</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>004 (aug, BatchNorm)</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>19.52</td></tr>
+      <tr><td>2k</td><td class="collapse">13.27</td></tr>
+      <tr><td>5k</td><td class="collapse">15.92</td></tr>
+      <tr><td>10k</td><td class="collapse">10.64</td></tr>
+      <tr><td>20k</td><td class="collapse">10.56 / 0.403 / 0.586</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>Eval collapses after 1k steps and ends at 10.6 dB.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-005">
+  <div class="kicker">Observation 4 <span class="tag">005</span></div>
+  <h2>Removing the mirror does not fix the collapse</h2>
+  <div class="date">2026-10-06 · 005 — augmentation without x-mirror</div>
+
+  <h3>Change</h3>
+  <p>004 with <code>AUG_MIRROR_PROB=0</code>, SH degree 2 raised every 2k steps, and the MCMC opacity / scale regularizers. <code>scripts/005_train_augment_nomirror.sh</code>, wandb <code>e1to2sqp</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>004</th><th>005 (no mirror)</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>19.52</td><td>16.81</td></tr>
+      <tr><td>3k</td><td class="collapse">13.97</td><td>19.47</td></tr>
+      <tr><td>5k</td><td class="collapse">15.92</td><td class="collapse">14.31</td></tr>
+      <tr><td>10k</td><td class="collapse">10.64</td><td class="collapse">10.26</td></tr>
+      <tr><td>20k</td><td class="collapse">10.56 / 0.403 / 0.586</td><td class="collapse">10.29 / 0.419 / 0.581</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>Same collapse, a little later (peak 19.47 at 3k): the mirror is not the cause.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-006">
+  <div class="kicker">Observation 5 <span class="tag">006</span></div>
+  <h2>LayerNorm instead of BatchNorm removes the collapse</h2>
+  <div class="date">2026-10-09 · 006 — LayerNorm LitePT</div>
+
+  <h3>Change</h3>
+  <p>005 with LayerNorm instead of BatchNorm in LitePT's stem / pooling / unpooling (<code>model.norm=layer</code>): no running statistics, so the eval forward matches training under augmentation. <code>scripts/006_train_augment_ln.sh</code>, wandb <code>97r4d5te</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>005 (BatchNorm)</th><th>006 (LayerNorm)</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>16.81</td><td>19.21</td></tr>
+      <tr><td>3k</td><td>19.47</td><td>19.31</td></tr>
+      <tr><td>5k</td><td class="collapse">14.31</td><td>20.10</td></tr>
+      <tr><td>10k</td><td class="collapse">10.26</td><td>22.20</td></tr>
+      <tr><td>20k</td><td class="collapse">10.29 / 0.419 / 0.581</td><td class="best">23.39 / 0.800 / 0.380</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>No collapse, steady climb to 23.39 dB: the collapse came from BatchNorm's running statistics under augmentation. LayerNorm is kept in every later run.</li>
+    <li>Still 5.4 dB below 003 without augmentation (28.75). The settings differ (SH 2 vs 3, regularizers, augmentation), but this is the first hint of what 017 later measured: augmentation costs a lot on a single scene.</li>
+    <li>On this cluster, 006 (bonsai) runs at ~1.9 s/step with ~51 GB reserved on a 3g.71gb slice.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="step" id="step3">
+  <div class="label"><span class="step-no">3</span>Step 3 <span class="tag grey">007–008</span></div>
+  <h2>Multiple scenes, with augmentation</h2>
+  <figure class="step-anim" id="step3-anim" data-step="3">
+    <div class="setup">
+      <div class="cell"><span class="k">Points</span><span class="v">MCMC means</span></div>
+      <div class="cell"><span class="k">Features</span><span class="v">colour (rgb)</span></div>
+      <div class="cell"><span class="k">Augmentation</span><span class="v">rotation · scale · voxel jitter</span></div>
+      <div class="cell changed"><span class="k">Scenes</span><span class="v">4 indoor scenes</span></div>
+    </div>
+  </figure>
+  <p>The step 2 recipe (LayerNorm, augmentation without mirror) on the four indoor Mip-NeRF 360 scenes at once: each batch is 8 views of one random scene, and each scene is evaluated on its own val split. Numbers from the Slurm logs.</p>
+  <p class="step-res"><span class="k">Result</span> ~<b>20 dB</b> at 20k; with a scale-tail penalty and longer training <b>22.12 dB</b> at 120k.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-007">
+  <div class="kicker">Observation 6 <span class="tag">007</span></div>
+  <h2>One model on four indoor scenes: ~20 dB, LR 2e-3 for 20k</h2>
+  <div class="date">2026-10-10 · 007 — multi-scene indoor, LR / length sweep</div>
+
+  <h3>Change</h3>
+  <p>006 trained jointly on bonsai, counter, kitchen and room (MCMC means of each). Each batch is 8 views of one random scene; every scene is evaluated on its own val split. SH off until 10k (the head predicts degree 1, its outputs start at zero). Sweep over LR {2e-3, 6e-3, 1e-2} × {20k, 40k} steps. <code>scripts/007_train_multiscene_indoor.sh</code>, jobs 400–407.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>LR</th><th>20k: final (best)</th><th>40k: final (best)</th></tr></thead>
+    <tbody>
+      <tr><td>2e-3</td><td class="best">20.05 / 0.711 / 0.425 (20.55 @15k)</td><td class="collapse">13.02 (20.71 @26k)</td></tr>
+      <tr><td>6e-3</td><td>19.15 / 0.690 / 0.444 (19.98 @17k)</td><td>20.72 / 0.721 / 0.423</td></tr>
+      <tr><td>1e-2</td><td>19.65 / 0.698 / 0.448</td><td>20.20 / 0.715 / 0.429</td></tr>
+    </tbody>
+  </table></div>
+  <p class="caption">Mean over the 4 scenes. Per scene at 20k, LR 2e-3: bonsai 19.44, counter 19.89, kitchen 19.87, room 21.01.</p>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>One model on four scenes lands around 20–20.7 dB. Bonsai drops from 23.39 (006, alone) to ~19.4–20.3.</li>
+    <li>At 20k, LR 2e-3 is best; with 40k steps the higher LRs catch up (6e-3: 20.72).</li>
+    <li>LR 2e-3 / 40k collapsed late (best 20.71 at 26k, 13.02 at the end); the cause was not recorded.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-008">
+  <div class="kicker">Observation 7 <span class="tag">008</span></div>
+  <h2>A scale-tail penalty helps, and longer training keeps helping</h2>
+  <div class="date">2026-10-10 → 10-11 · 008 — tail penalty, then 5 continuation rounds</div>
+
+  <h3>Change</h3>
+  <p>007 (LR 2e-3, 20k) with the mean-scale penalty replaced by a penalty on the tail only: 0.01 · Σ excess over scale 0.1. Small Gaussians are left alone; the few that grow toward max_scale get pushed back. <code>scripts/008_train_multiscene_indoor_tailreg.sh</code>, job 409. Then five more rounds of 20k steps, each started from the previous final weights with the optimizer and LR schedule restarted and SH 1 on from the start (jobs 416–420).</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>total steps</th><th>mean (4 scenes)</th><th>bonsai</th><th>counter</th><th>kitchen</th><th>room</th></tr></thead>
+    <tbody>
+      <tr><td>20k (007)</td><td>20.05 / 0.711 / 0.425</td><td>19.44</td><td>19.89</td><td>19.87</td><td>21.01</td></tr>
+      <tr><td>20k (008)</td><td>20.72 / 0.720 / 0.422</td><td>20.43</td><td>20.33</td><td>19.96</td><td>22.15</td></tr>
+      <tr><td>40k</td><td>21.26 / 0.732 / 0.411</td><td>20.87</td><td>20.84</td><td>20.35</td><td>22.99</td></tr>
+      <tr><td>60k</td><td>21.64 / 0.738 / 0.405</td><td>21.25</td><td>21.18</td><td>20.64</td><td>23.50</td></tr>
+      <tr><td>80k</td><td>21.85 / 0.743 / 0.402</td><td>21.50</td><td>21.36</td><td>20.84</td><td>23.69</td></tr>
+      <tr><td>100k</td><td>22.01 / 0.746 / 0.400</td><td>21.73</td><td>21.46</td><td>20.97</td><td>23.89</td></tr>
+      <tr><td>120k</td><td class="best">22.12 / 0.747 / 0.398</td><td>21.84</td><td>21.55</td><td>21.14</td><td>23.95</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>The tail penalty adds +0.67 dB over 007 at 20k, on every scene.</li>
+    <li>Every extra round helps, with shrinking gains (+0.54, +0.38, +0.21, +0.16, +0.11 dB): still not converged at 120k, and still ~10 dB below MCMC per scene.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="step" id="step4">
+  <div class="label"><span class="step-no">4</span>Step 4 <span class="tag grey">009–014</span></div>
+  <h2>Switch to EDGS initialisation</h2>
+  <figure class="step-anim" id="step4-anim" data-step="4">
+    <div class="setup">
+      <div class="cell changed"><span class="k">Points</span><span class="v">EDGS points</span></div>
+      <div class="cell changed"><span class="k">Features</span><span class="v">rgb + RoMa features</span></div>
+      <div class="cell"><span class="k">Augmentation</span><span class="v">rotation · scale · voxel jitter</span></div>
+      <div class="cell"><span class="k">Scenes</span><span class="v">bonsai → 4 indoor → 7</span></div>
+    </div>
+  </figure>
+  <p>MCMC means need a converged per-scene optimization first. From 009 on, the input points come from EDGS (RoMa dense matches triangulated from the training views, every 8th view held out), with RoMa features per point; then more scenes and the Muon optimizer. Numbers from the Slurm logs and wandb.</p>
+  <p class="step-res"><span class="k">Result</span> bonsai <b>21.49 dB</b> (rgb only: 18.46); indoor <b>22.48 dB</b> with Muon; all seven scenes 21.25 dB.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-009">
+  <div class="kicker">Observation 8 <span class="tag">009</span></div>
+  <h2>EDGS points need the RoMa features</h2>
+  <div class="date">2026-10-11 · 009 — EDGS points as input (bonsai)</div>
+
+  <h3>Change</h3>
+  <p>Bonsai, single scene, with EDGS points instead of the MCMC means (<code>input.source=edgs</code>): points failing EDGS's reprojection test are dropped, then a fixed random 1M subset (= MCMC's cap_max). The loader checks that the points reproject onto their source pixels (median error ≤ 3 px). Otherwise the 008 recipe (LayerNorm, augmentation without mirror, opacity regularizer + tail penalty, SH 1 from 10k), 20k steps. Two inputs:</p>
+  <ul>
+    <li><code>rgb</code>: base colour only — job 450, wandb <code>1uechb5q</code>;</li>
+    <li><code>rgb + RoMa</code>: + RoMa features (VGG19 relu1_2 / 2_2 / 3_4 and DINOv2; 104 PCA dims), standardized, Linear(104, 64)–GELU–Linear(64, 64), concatenated with rgb (67 channels into LitePT) — job 451, wandb <code>xdwtqefh</code>.</li>
+  </ul>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>bonsai, 20k</th><th>PSNR / SSIM / LPIPS</th></tr></thead>
+    <tbody>
+      <tr><td>006 (MCMC means, rgb)</td><td>23.39 / 0.800 / 0.380</td></tr>
+      <tr><td>009 EDGS, rgb</td><td>18.46 / 0.667 / 0.500</td></tr>
+      <tr><td>009 EDGS, rgb + RoMa</td><td class="best">21.49 / 0.755 / 0.409</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>RoMa features add +3.0 dB over rgb alone on EDGS points. rgb + RoMa is the input from here on.</li>
+    <li>EDGS + RoMa is 1.9 dB below 006 with MCMC means (different regularizer and SH schedule, so only indicative), but it no longer needs a per-scene MCMC run.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-010">
+  <div class="kicker">Observation 9 <span class="tag">010</span></div>
+  <h2>Indoor with EDGS + RoMa and 64-view updates beats the MCMC-points model</h2>
+  <div class="date">2026-10-12 · 010 — four indoor scenes, gradient accumulation, DDP</div>
+
+  <h3>Change</h3>
+  <p>The four indoor scenes (as 008) with EDGS + RoMa input (as 009) and gradient accumulation: each update averages 4 micro-batches of 8 views (one random scene each) on each of 2 GPUs (DDP) = 64 views per update. LR 4e-3, 10k steps, SH 1 from 5k, tail penalty above 0.3. <code>scripts/010_train_indoor_edgs_gradaccum.sh</code>, job 460, wandb <code>6wowexvs</code>; second round of 10k from its weights (schedule restarted), job 473, wandb <code>p3aw45t5</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th></th><th>mean (4 scenes)</th><th>bonsai</th><th>counter</th><th>kitchen</th><th>room</th></tr></thead>
+    <tbody>
+      <tr><td>008, 20k (MCMC means)</td><td>20.72 / 0.720 / 0.422</td><td>20.43</td><td>20.33</td><td>19.96</td><td>22.15</td></tr>
+      <tr><td>008, 120k</td><td>22.12 / 0.747 / 0.398</td><td>21.84</td><td>21.55</td><td>21.14</td><td>23.95</td></tr>
+      <tr><td>010, 10k</td><td>21.87 / 0.721 / 0.429</td><td>21.88</td><td>21.11</td><td>20.89</td><td>23.60</td></tr>
+      <tr><td>010, 20k (round 2)</td><td class="best">22.29 / 0.730 / 0.419</td><td>22.31</td><td>21.47</td><td>21.34</td><td>24.03</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>With EDGS + RoMa and 64-view updates, 20k updates pass what the MCMC-points model reached in 120k (22.29 vs 22.12 PSNR), on every scene. SSIM / LPIPS are a little worse (0.730 vs 0.747).</li>
+    <li>Not a matched comparison: 010 sees 64 views per update vs 8 in 008, and different input points / features.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-011">
+  <div class="kicker">Observation 10 <span class="tag">011</span></div>
+  <h2>All seven Mip-NeRF scenes in one model: 21.25 dB</h2>
+  <div class="date">2026-10-12 · 011 — all seven scenes</div>
+
+  <h3>Change</h3>
+  <p>010 on all seven Mip-NeRF 360 scenes: indoor at factor 2 with 1M EDGS points, outdoor (bicycle, garden, stump) at factor 4 with 1.5M points (as the MCMC baselines). One full H200, 4 × 8 = 32 views per update, LR 3e-3, AdamW, 30k steps, SH 1 from 15k. <code>scripts/011_train_all7_edgs_gradaccum.sh</code>, job 459, wandb <code>5vlrx5ul</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>scene</th><th>011, 30k</th><th>MCMC</th><th>gap</th></tr></thead>
+    <tbody>
+      <tr><td>bonsai</td><td>21.63</td><td>32.80</td><td>−11.2</td></tr>
+      <tr><td>counter</td><td>20.97</td><td>29.44</td><td>−8.5</td></tr>
+      <tr><td>kitchen</td><td>20.73</td><td>31.76</td><td>−11.0</td></tr>
+      <tr><td>room</td><td>23.43</td><td>32.27</td><td>−8.8</td></tr>
+      <tr><td>bicycle</td><td>19.97</td><td>25.77</td><td>−5.8</td></tr>
+      <tr><td>garden</td><td>20.56</td><td>27.59</td><td>−7.0</td></tr>
+      <tr><td>stump</td><td>21.48</td><td>27.11</td><td>−5.6</td></tr>
+      <tr><td><strong>mean</strong></td><td><strong>21.25 / 0.615 / 0.460</strong></td><td>29.53</td><td>−8.3</td></tr>
+    </tbody>
+  </table></div>
+  <p class="caption">Mean eval PSNR over training: 19.49 (2k), 20.12 (6k), 20.47 (10k), 20.79 (16k), 20.94 (20k), 21.25 (30k).</p>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>One model covers all seven scenes at 21.25 dB, still rising slowly at 30k.</li>
+    <li>The gap to MCMC is smaller outdoors (−5.6 to −7.0 dB) than indoors (−8.5 to −11.2 dB).</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-012">
+  <div class="kicker">Observation 11 <span class="tag">012</span></div>
+  <h2>Muon beats AdamW on bonsai</h2>
+  <div class="date">2026-10-14 · 012 — Muon optimizer (bonsai)</div>
+
+  <h3>Change</h3>
+  <p>009 rgb + RoMa with Muon (<code>optimizer.name=muon</code>, moonlight scaling) on the hidden <code>nn.Linear</code> weights of LitePT and the feature MLP, AdamW on the rest; LR 2e-3 for both. <code>scripts/012_train_edgs_muon.sh</code>, job 491, wandb <code>agx9zvwp</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>bonsai, 20k</th><th>PSNR / SSIM / LPIPS</th></tr></thead>
+    <tbody>
+      <tr><td>009 (AdamW)</td><td>21.49 / 0.755 / 0.409</td></tr>
+      <tr><td>012 (Muon)</td><td class="best">22.07 / 0.770 / 0.393</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>+0.58 dB / +0.015 SSIM / −0.016 LPIPS with the same everything else. Muon is the optimizer from here on, and 012 is the base of 015.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-013">
+  <div class="kicker">Observation 12 <span class="tag">013</span></div>
+  <h2>Muon beats AdamW on the indoor scenes too</h2>
+  <div class="date">2026-10-14 · 013 — Muon, four indoor scenes</div>
+
+  <h3>Change</h3>
+  <p>010 with Muon, on one GPU with 8 micro-batches × 8 views = 64 views per update (as 010's 2 GPUs × 4), LR 4e-3, 10k steps. <code>scripts/013_train_indoor_edgs_muon.sh</code>, job 496, wandb <code>z6fw6akw</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th></th><th>mean (4 scenes)</th><th>bonsai</th><th>counter</th><th>kitchen</th><th>room</th></tr></thead>
+    <tbody>
+      <tr><td>010, 10k (AdamW)</td><td>21.87 / 0.721 / 0.429</td><td>21.88</td><td>21.11</td><td>20.89</td><td>23.60</td></tr>
+      <tr><td>010, 20k (AdamW, 2 rounds)</td><td>22.29 / 0.730 / 0.419</td><td>22.31</td><td>21.47</td><td>21.34</td><td>24.03</td></tr>
+      <tr><td>013, 10k (Muon)</td><td class="best">22.48 / 0.735 / 0.415</td><td>22.42</td><td>21.60</td><td>21.50</td><td>24.39</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>+0.61 dB over AdamW at the same 10k updates, on every scene; Muon in 10k also beats AdamW in 20k.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-014">
+  <div class="kicker">Observation 13 <span class="tag">014</span></div>
+  <h2>Muon on all seven scenes did not finish</h2>
+  <div class="date">2026-10-14 · 014 — Muon, all seven scenes</div>
+
+  <h3>Change</h3>
+  <p>011 with Muon and the 013 batch recipe: 8 × 8 = 64 views per update, LR 4e-3, 30k steps, SH from 15k, full H200. <code>scripts/014_train_all7_edgs_muon.sh</code>, wandb <code>e7dwqcse</code>. 011 (32 views / update, LR 3e-3, AdamW) is a reference, not a matched baseline.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>011 (AdamW)</th><th>014 (Muon)</th></tr></thead>
+    <tbody>
+      <tr><td>2k</td><td>19.49</td><td>15.46</td></tr>
+      <tr><td>4k</td><td>19.90</td><td>18.26</td></tr>
+      <tr><td>6k</td><td>20.12</td><td>18.76</td></tr>
+      <tr><td>8k</td><td>19.88</td><td>19.50</td></tr>
+      <tr><td>10k</td><td>20.47</td><td>18.45</td></tr>
+      <tr><td>12k</td><td>19.52</td><td>18.60</td></tr>
+      <tr><td>14k</td><td>20.63</td><td class="collapse">17.35 / 0.538 / 0.522</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>Below 011 at every eval, falling after 8k; the run crashed after the 14k eval. A relaunch (job 497, 2026-10-16) failed at startup after 39 s. No completed result.</li>
+    <li>Unlike 012 / 013, Muon did not help here; with different views per update and LR, the cause is not isolated.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="step" id="step5">
+  <div class="label"><span class="step-no">5</span>Step 5 <span class="tag grey">015–017</span></div>
+  <h2>Back to bonsai: what limits quality</h2>
+  <figure class="step-anim" id="step5-anim" data-step="5">
+    <div class="setup">
+      <div class="cell"><span class="k">Points</span><span class="v">EDGS points</span></div>
+      <div class="cell"><span class="k">Features</span><span class="v">rgb + RoMa features</span></div>
+      <div class="cell changed"><span class="k">Augmentation</span><span class="v">on (015–016) → off (017)</span></div>
+      <div class="cell changed"><span class="k">Scenes</span><span class="v">bonsai</span></div>
+    </div>
+  </figure>
+  <p>Back to a single scene to find what limits quality: predicted position offsets, positional encoding, drop-path, Gaussian size, SH degree and augmentation. From here on the text is the research log (<code>docs/research_log.md</code>).</p>
+  <p class="step-res"><span class="k">Result</span> offsets, PE, no drop-path, larger Gaussians + SH 3, no augmentation: bonsai <b>28.7 dB</b>.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="setup">
+  <div class="kicker">Setup</div>
+  <h2>Common setup</h2>
+  <p>One entry per change that was trained. Metrics are the eval split (37 views), PSNR / SSIM / LPIPS, unless noted. All runs: bonsai, EDGS points (1M) + RoMa features, LayerNorm LitePT, augmentation (z-rot 180°, tilt 5°, scale 0.8–1.25, no mirror), Muon (moonlight, lr 2e-3), 20k steps, SH degree 1 from 10k, 3g.71gb MIG slice, ~1.6 s/step.</p>
+  <p>Run folders: <code>results/&lt;run name&gt;</code>; logs: <code>$WORK/logs/&lt;job name&gt;_&lt;job id&gt;.out</code>.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-015">
+  <div class="kicker">Observation 14 <span class="tag">015</span></div>
+  <h2>Predicted position offsets help</h2>
+  <div class="date">2026-10-14 · 015 — predicted position offsets (1.5 voxels)</div>
+
+  <h3>Change</h3>
+  <p>012 + a zero-initialized offset head: each Gaussian's mean is <code>input point + 0.0075 · tanh(·)</code> (bound = 1.5 LitePT voxels of 0.005). <code>scripts/015_train_edgs_muon_offsets.sh</code>, job 498, wandb <code>8yb3t4cm</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>012 (no offsets)</th><th>015 (offsets 1.5 vox)</th></tr></thead>
+    <tbody>
+      <tr><td>9k</td><td>21.37 / 0.757 / 0.403</td><td>21.85 / 0.771 / 0.389</td></tr>
+      <tr><td>15k</td><td>21.98 / 0.767 / 0.395</td><td>22.23 / 0.780 / 0.381</td></tr>
+      <tr><td>20k</td><td>22.07 / 0.770 / 0.393</td><td class="best">22.36 / 0.784 / 0.378</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>Offsets help: +0.3 dB PSNR, +0.014 SSIM, −0.015 LPIPS at 20k; the gap is largest in SSIM / LPIPS (fine structure).</li>
+    <li>Offsets stay small (mean |offset| ≈ 0.0016 vs mean scale ≈ 0.01); 2–3 % of the components sit at the bound, slowly rising during training.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-015-25">
+  <div class="kicker">Observation 15 <span class="tag">015 · 2.5 vox</span></div>
+  <h2>A larger offset bound does not help</h2>
+  <div class="date">2026-10-14 · 015 with offsets 2.5 voxels</div>
+
+  <h3>Change</h3>
+  <p>Same as 015 with <code>MAX_OFFSET_VOXELS=2.5</code> (bound 0.0125). Job 506, wandb <code>w9jgtj6y</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>015 (1.5 vox)</th><th>2.5 vox</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>19.08</td><td>19.60</td></tr>
+      <tr><td>4k</td><td>20.64</td><td>21.10</td></tr>
+      <tr><td>9k</td><td>21.85</td><td>21.86</td></tr>
+      <tr><td>15k</td><td>22.23 / 0.780 / 0.381</td><td>22.36 / 0.782 / 0.378</td></tr>
+      <tr><td>20k</td><td>22.36 / 0.783 / 0.378</td><td>22.38 / 0.783 / 0.377</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>No gain at 20k (+0.02 dB, within noise); the early lead at 4k was noise.</li>
+    <li>The bound was not limiting: with 2.5 vox the offsets grow only slightly (mean |offset| 0.0020 vs 0.0016) and the saturated fraction stays ~2 % (1.9 % vs 2.2 %). Keep 1.5 vox.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-016">
+  <div class="kicker">Observation 16 <span class="tag">016</span></div>
+  <h2>Positional encoding speeds up training, then eval collapses</h2>
+  <div class="date">2026-10-14 · 016 — Fourier positional encoding of the input points</div>
+
+  <h3>Change</h3>
+  <p>015 (offsets 1.5 vox) + positional encoding of the input points (<code>models/pos_encoding.py</code>, <code>scripts/016_train_edgs_muon_offsets_pe.sh</code>):</p>
+  <ul>
+    <li>center = scene origin (with <code>data.parser.normalize</code>, the median of the COLMAP points; augmentation rotates/scales about it) — no per-batch center;</li>
+    <li>one isotropic divider <code>r</code> = 95th percentile of <code>|coord|</code>, computed <strong>after</strong> augmentation → <code>p = R x / r</code> (rotates with the cloud, invariant to the augmentation's scale). Bonsai: r95 = 3.56 normalized units, max <code>|p|</code> ≈ 46, 0.22 % of points beyond 1.5 r;</li>
+    <li>encoding <code>[p | sin/cos(2^k π p)], k &lt; 4</code> = 27 channels;</li>
+    <li>two injection points:
+      <ul>
+        <li><code>input</code>: concatenated after the RoMa MLP, <code>[rgb | mlp(RoMa) | PE]</code>, LitePT in_channels 67 → 94 — job 504, wandb <code>pdbb1nad</code>;</li>
+        <li><code>embed</code>: added after LitePT's stem through a zero-initialized Linear(27 → 36) — job 505, wandb <code>3gglxh35</code>.</li>
+      </ul>
+    </li>
+  </ul>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>015</th><th>016 input</th><th>016 embed</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>19.08</td><td class="best">20.05</td><td class="best">20.02</td></tr>
+      <tr><td>2k</td><td>20.26</td><td class="collapse">13.18</td><td>19.36</td></tr>
+      <tr><td>3k</td><td>19.95</td><td class="collapse">14.88</td><td>20.98</td></tr>
+      <tr><td>4k</td><td>20.64</td><td class="collapse">13.30</td><td class="collapse">15.93</td></tr>
+    </tbody>
+  </table></div>
+  <p class="caption">Both cancelled at ~4k (checkpoints up to step 3999 kept).</p>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>PE speeds up early training: +1 dB over 015 at 1k, both variants alike.</li>
+    <li>Then <strong>both collapse on eval</strong> (input from 2k, embed at 4k) while the <em>training</em> PSNR stays healthy (~21.5, ahead of 015) and training-time scales are normal (max ≈ 0.1, same as 015).</li>
+    <li>The collapse is a <strong>train / eval mode mismatch</strong>: the same step-1999 checkpoint of <code>input</code> gives 12.86 dB rendered in eval mode but 20.65 dB in train mode (same weights, pose and inputs); <code>embed</code> 19.36 vs 20.35. The only mode-dependent layer is DropPath (<code>model.drop_path=0.3</code>, active only in the attention stages 3–4; no BatchNorm with <code>model.norm=layer</code>, dropouts 0).</li>
+    <li>Hypothesis (not verified): with absolute position available, the deep branches learn position-specific corrections tuned to the stochastic (dropped, ×1/keep) training forward; with all branches on in eval they overshoot. Without PE (015) this doesn't happen. <code>embed</code> collapses later because its PE path starts at zero.</li>
+    <li>Suspected amplifier: the unbounded raw-p tail (|p| up to ~46 entering the stem conv next to O(1) inputs) → tested in the next two entries.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-016-noraw">
+  <div class="kicker">Observation 17 <span class="tag">509</span></div>
+  <h2>The unbounded raw-p tail is not the cause</h2>
+  <div class="date">2026-10-15 · 016 without raw p</div>
+
+  <h3>Change</h3>
+  <p>016 <code>input</code> with <code>POS_INCLUDE_RAW=false</code>: only the 24 bounded sin/cos channels (in_channels 91); the tail still wraps (period 2). Job 509, wandb <code>as0lhhc3</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>015</th><th>016 input (raw p)</th><th>016 input, no raw p</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>19.08</td><td>20.05</td><td>19.95</td></tr>
+      <tr><td>2k</td><td>20.26</td><td class="collapse">13.18</td><td class="collapse"><strong>13.02</strong></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>Collapses on eval at 2k exactly like 504, with a fully bounded encoding (all channels in [−1, 1]); training PSNR healthy (21.1 mean over 1.5k–2.2k), scales normal (max ≈ 0.1).</li>
+    <li>→ The unbounded raw-p tail is <strong>not</strong> the cause (nor a visible amplifier): any absolute positional input in <code>input</code> mode triggers the collapse. The drop-path train/eval mismatch remains the main suspect.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-016-clamp">
+  <div class="kicker">Observation 18 <span class="tag">511</span></div>
+  <h2>Clamping only delays the collapse</h2>
+  <div class="date">2026-10-15 · 016 with raw p, radial clamp at r98</div>
+
+  <h3>Change</h3>
+  <p>016 <code>input</code> with raw p and <code>POS_CLAMP=98</code>: still normalized by r95, but before encoding every point farther than the 98th-percentile distance is projected radially onto that sphere (direction kept). 98 % of points are unchanged, the farthest 2 % are clamped; the whole encoding is bounded by r98 / r95 = 1.16 on bonsai (was ~46). Job 511, wandb <code>9087lgtc</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>015</th><th>016 input (raw p)</th><th>016 no raw p</th><th>016 clamp r98</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>19.08</td><td>20.05</td><td>19.95</td><td>20.07</td></tr>
+      <tr><td>2k</td><td>20.26</td><td class="collapse">13.18</td><td class="collapse">13.02</td><td class="best">20.68</td></tr>
+      <tr><td>3k</td><td>19.95</td><td class="collapse">14.88</td><td>—</td><td class="collapse"><strong>14.30</strong></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>Best of all runs at 2k (20.68), then collapses on eval at 3k; training PSNR healthy (21.2 mean over 1.5k–2.3k).</li>
+    <li>The clamp <strong>delays</strong> the collapse by ~1k steps but doesn't prevent it: every bounded variant collapses. The tail is at most an accelerator, not the cause.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-dp0">
+  <div class="kicker">Observation 19 <span class="tag">512</span></div>
+  <h2>Drop-path causes the eval collapse</h2>
+  <div class="date">2026-10-15 · 016 with raw p, clamp r98, no drop-path</div>
+
+  <h3>Change</h3>
+  <p>As the previous entry (raw p, radial clamp at r98, <code>input</code>) with <code>model.drop_path=0.0</code> (LitePT default 0.3), so the training and eval forward are the same network. Tests the drop-path hypothesis directly against 511. Job 512 (overrides <code>model.drop_path=0.0</code>, own <code>trainer.output_dir</code> / <code>wandb.name</code> with <code>_dp0</code>), wandb <code>bgwgg2ah</code>. 509 (no raw p) cancelled to free its slice.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>015</th><th>511 (clamp, drop-path 0.3)</th><th>512 (clamp, drop-path 0)</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>19.08</td><td>20.07</td><td>20.13</td></tr>
+      <tr><td>2k</td><td>20.26</td><td>20.68</td><td>20.79</td></tr>
+      <tr><td>3k</td><td>19.95</td><td class="collapse">14.30</td><td class="best">21.10</td></tr>
+      <tr><td>7k</td><td>21.57</td><td>—</td><td>21.70</td></tr>
+      <tr><td>11k</td><td>21.73</td><td>—</td><td>20.97</td></tr>
+      <tr><td>15k</td><td>22.23 / 0.780 / 0.381</td><td>—</td><td>22.20 / 0.779 / 0.384</td></tr>
+      <tr><td>20k</td><td>22.36 / 0.783 / 0.378</td><td>—</td><td>22.34 / 0.783 / 0.380</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>No collapse at 3k, where 511 (identical except drop-path) collapsed: <strong>drop-path is the cause</strong> of the eval collapse. The eval data path (canonical pose, no grid jitter) is unchanged, so it is not the cause.</li>
+    <li>+1.15 dB over 015 at 3k. 511 cancelled after its collapse.</li>
+    <li>The lead is gone by ~7k; <strong>20k equals 015</strong> (22.34 vs 22.36). One dip at 11k (20.97, recovered by 12k). PE with raw p + clamp only speeds up the start.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-513">
+  <div class="kicker">Observation 20 <span class="tag">513</span></div>
+  <h2>PE without raw p and without drop-path is the best bonsai run so far</h2>
+  <div class="date">2026-10-15 · 016 without raw p, no drop-path</div>
+
+  <h3>Change</h3>
+  <p>509's setup (sin/cos only, <code>POS_INCLUDE_RAW=false</code>, <code>input</code>) with <code>model.drop_path=0.0</code>. Pairs with 509 the way 512 pairs with 511. Job 513 (overrides, own <code>_dp0</code> output dir / wandb name), wandb <code>4tlh1xuf</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>015</th><th>512 (raw p + clamp, dp 0)</th><th>513 (no raw p, dp 0)</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>19.08</td><td>20.13</td><td>19.99</td></tr>
+      <tr><td>2k</td><td>20.26</td><td>20.79</td><td>20.97</td></tr>
+      <tr><td>3k</td><td>19.95</td><td>21.10</td><td>21.18</td></tr>
+      <tr><td>9k</td><td>21.85</td><td>21.95</td><td>21.84</td></tr>
+      <tr><td>15k</td><td>22.23 / 0.780 / 0.381</td><td>22.20 / 0.779 / 0.384</td><td>22.49 / 0.786 / 0.375</td></tr>
+      <tr><td>20k</td><td>22.36 / 0.783 / 0.378</td><td>22.34 / 0.783 / 0.380</td><td class="best">22.59 / 0.789 / 0.373</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>No collapse at 2k, where 509 collapsed — same conclusion as 512, for the encoding without raw p. +0.7 dB over 015 at 2k.</li>
+    <li><strong>Best run so far at 20k</strong>: +0.23 dB / +0.006 SSIM / −0.005 LPIPS over 015, ahead at every eval from 13k on (+0.2–0.3). Training PSNR is higher by about the same amount (23.05 vs 22.77, mean of 19–20k), so it fits the scene better rather than generalizing better (eval views are of the same scene).</li>
+    <li>vs 512 (differs only in raw p + clamp): +0.25 dB at 20k. The raw linear channels seem to hurt late in training; one seed each, so treat this as weak evidence.</li>
+    <li>Confound: 513 differs from 015 in PE <strong>and</strong> drop-path. 512 (also dp 0) equals 015, which hints that dp 0 alone is not worth much, but that is not measured.</li>
+    <li>Global PE is a scene-location input: the gain is not expected to carry over to chunk-local PE or to unseen scenes.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-017">
+  <div class="kicker">Observation 21 <span class="tag">017</span></div>
+  <h2>Larger Gaussians, SH 3, no augmentation: +6.1 dB</h2>
+  <div class="date">2026-10-15 · 017 — larger Gaussians, SH 3, no augmentation</div>
+
+  <h3>Change</h3>
+  <p>513's setup (sin/cos PE without raw p, drop-path 0, offsets 1.5 vox) with: hard scale bound <code>head.max_scale</code> 1.0 → 0.4 and the scale-tail penalty off (in 012–016 the penalty, 0.01 · Σ excess over 0.1, kept every scale ≤ 0.1); SH degree 3, one degree per 1000 steps (was degree 1 from 10k); no augmentation (no rotation / tilt / scale, no voxel jitter). Tests whether the size bound and the missing view dependence cause the underfit. <code>scripts/017_train_edgs_bigscale_sh3_noaug.sh</code>, job 514, wandb <code>rg5ev00l</code>.</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>513</th><th>017</th></tr></thead>
+    <tbody>
+      <tr><td>1k</td><td>19.99</td><td>24.44</td></tr>
+      <tr><td>3k</td><td>21.18</td><td>25.84</td></tr>
+      <tr><td>9k</td><td>21.84</td><td>27.81</td></tr>
+      <tr><td>15k</td><td>22.49 / 0.786 / 0.375</td><td>28.53 / 0.889 / 0.256</td></tr>
+      <tr><td>20k</td><td>22.59 / 0.789 / 0.373</td><td class="best">28.72 / 0.891 / 0.253</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <ul>
+    <li><strong>+6.1 dB over 513</strong> (+0.10 SSIM, −0.12 LPIPS); ahead by 4.5 dB already at 1k. Best run by far; the gap to MCMC (32.8) drops from ~10 to ~4 dB.</li>
+    <li>Train PSNR 28.25 (mean 19–20k) vs eval 28.72: still no overfitting.</li>
+    <li>The bound is used: scale_max sits at 0.4 and ~21k of 1M Gaussians are above 0.1 (scale_mean 0.009); opacity_mean 0.055; offsets saturate more (4.1 % vs ~2 %, mean |offset| 0.0030).</li>
+    <li>Three changes at once (scale bound / tail penalty, SH 3, no augmentation); which one carries the gain is not measured. The early 1k lead points at the scale bound or no augmentation rather than SH (degree ≥ 1 only from 1k).</li>
+    <li>~1.41 s/step, 42 GB reserved on the 3g.71gb slice.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section class="step" id="step6">
+  <div class="label"><span class="step-no">6</span>Step 6 <span class="tag grey">018</span></div>
+  <h2>Many scenes (DL3DV)</h2>
+  <figure class="step-anim" id="step6-anim" data-step="6">
+    <div class="setup">
+      <div class="cell"><span class="k">Points</span><span class="v">EDGS points</span></div>
+      <div class="cell"><span class="k">Features</span><span class="v">rgb + RoMa features</span></div>
+      <div class="cell changed"><span class="k">Augmentation</span><span class="v">rotation · scale · voxel jitter</span></div>
+      <div class="cell changed"><span class="k">Scenes</span><span class="v">120 DL3DV scenes</span></div>
+    </div>
+  </figure>
+  <p>The 017 recipe trained on many scenes at once, evaluated on held-out views of training scenes and on scenes never trained on.</p>
+  <p class="step-res"><span class="k">Result</span> running: seen <b>18.04</b> / unseen <b>17.44 dB</b> at 12k.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-018">
+  <div class="kicker">Observation 22 <span class="tag">018</span></div>
+  <h2>Scaling the 017 recipe to 120 DL3DV scenes</h2>
+  <div class="date">2026-10-17 · 018 — 017 recipe on 120 DL3DV scenes</div>
+
+  <h3>Change</h3>
+  <p>The 017 setup (EDGS + RoMa, Muon, offsets 1.5 vox, sin/cos PE without raw p, drop-path 0, max_scale 0.4 without tail penalty, SH 3) trained on many scenes with <code>core/trainer_dl3dv.py</code>, <code>scripts/018_train_dl3dv_edgs.sh</code>:</p>
+  <ul>
+    <li>fixed split <code>data/splits/dl3dv_133.json</code> (133 DL3DV benchmark scenes with EDGS features; 7 failed extraction): 120 train, of which 10 are <code>eval_seen</code> (5 bounded / 5 unbounded), and 13 <code>eval_unseen</code> scenes never trained on (7 / 6); both evaluated on every 8th view at images_4 (960×540);</li>
+    <li>every scene scaled so its COLMAP points' r95 = 3.56 (bonsai's). Unscaled DL3DV scenes are ~2× larger, and one forward OOM'd a full H200 (smoke 765). After scaling the EDGS r95 is 3.0–6.2 (COLMAP r95 is a loose proxy);</li>
+    <li>all valid EDGS points in RAM; a fresh random 1M (bounded) / 1.25M (unbounded) per micro-batch; one fixed subset per scene for eval;</li>
+    <li>mild augmentation (z-rot ±30°, tilt ±2°, scale 0.9–1.1, jitter);</li>
+    <li>8 views × grad accum 8 = 64 views per update, LR 4e-4, 60k steps, SH degree +1 every 2000 steps; full H200, <code>expandable_segments</code>, CUDA cache emptied around eval.</li>
+  </ul>
+  <p>Smoke test (lazy mode, 4 training scenes, 100 steps, job 766): ~7.5 s/step, peak 77 GB allocated / 82 GB reserved; eval at step 100 seen 12.48 / unseen 12.56 dB (pipeline check only).</p>
+  <p>Jobs 767 + 768 (<code>RESUME=latest</code>, after 767), 72 h each, wandb <code>khuy5mzi</code>: startup 4 min (107.7 GiB of points in RAM), ~8.0 s/step wall (7.4 s GPU), ~78–82 GB allocated / 103.5 GB reserved. <strong>Cancelled at ~step 100</strong>, first the 5-scene check below.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-018-5">
+  <div class="kicker">Observation 23 <span class="tag">018 · 5 scenes</span></div>
+  <h2>The DL3DV adaptation trains like the Mip-NeRF runs</h2>
+  <div class="date">2026-10-17 · 018 on 5 bounded DL3DV scenes (adaptation check)</div>
+
+  <h3>Change</h3>
+  <p>The 018 run restricted to the first 5 bounded training scenes of the split (<code>TRAIN_ENVIRONMENT=bounded TRAIN_LIMIT=5</code>: 0569e83f, 06da7966, 073f5a9b, 08539793, 093ef327); eval_seen = these 5, eval_unseen = the 13. Same settings as the 120-scene run (accum 8, LR 4e-4), 20k steps, eval every 1000, train images every 250 steps (wandb <code>e0jhbid0</code>). Checks that the DL3DV adaptation (loader, scaling, points) trains like the Mip-NeRF runs. Job 769.</p>
+  <p>~6.8 s/step, 64–67 GB allocated / 71.5 GB reserved. At step 1000:</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th></th><th>PSNR</th><th>SSIM</th><th>LPIPS</th></tr></thead>
+    <tbody>
+      <tr><td>eval_seen (5 bounded)</td><td>19.16</td><td>0.604</td><td>0.488</td></tr>
+      <tr><td>eval_unseen (13)</td><td>13.95</td><td>0.515</td><td>0.579</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Findings</h3>
+  <p>Train PSNR ~19 at step 1230. The seen scenes train normally, so the adaptation works. Unseen is expected to be low with 5 training scenes. <strong>Stopped at step ~1230</strong> to start the 120-scene run.</p>
+  <p>Restart of the 120-scene run: jobs 770 + 771 (<code>RESUME=latest</code>, after 770), 72 h each, same config as 767/768, wandb <code>n9w7wldz</code>. Step 5: 6.8 s/step, 68 GB allocated / 97.5 GB reserved.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="obs-018-run">
+  <div class="kicker">Observation 24 <span class="tag">018 · 120 scenes</span></div>
+  <h2>120 scenes after 12k steps: unseen scenes close to seen</h2>
+  <div class="date">2026-10-17 → now · 018 on 120 DL3DV scenes</div>
+
+  <h3>Change</h3>
+  <p>The 120-scene run as described above (jobs 770 + 771, wandb <code>n9w7wldz</code>), eval every 2000 steps on the 10 <code>eval_seen</code> and 13 <code>eval_unseen</code> scenes. 770 ran to ~12.6k steps and was cancelled; the run continues from the step-11999 checkpoint as job 790 with DDP on two full H200s (started 2026-10-19, running).</p>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>step</th><th>eval_seen (10)</th><th>eval_unseen (13)</th></tr></thead>
+    <tbody>
+      <tr><td>2k</td><td>16.55 / 0.589 / 0.510</td><td>16.96 / 0.576 / 0.519</td></tr>
+      <tr><td>4k</td><td>17.62 / 0.625 / 0.452</td><td>17.39 / 0.601 / 0.471</td></tr>
+      <tr><td>6k</td><td>17.81 / 0.632 / 0.443</td><td>17.30 / 0.605 / 0.466</td></tr>
+      <tr><td>8k</td><td>17.93 / 0.638 / 0.430</td><td>17.37 / 0.606 / 0.456</td></tr>
+      <tr><td>10k</td><td>18.23 / 0.644 / 0.426</td><td>17.52 / 0.609 / 0.454</td></tr>
+      <tr><td>12k</td><td>18.04 / 0.645 / 0.426</td><td>17.44 / 0.610 / 0.452</td></tr>
+    </tbody>
+  </table></div>
+  <p class="caption">At 12k, bounded / unbounded PSNR: seen 18.49 / 17.59, unseen 17.33 / 17.56. Per-scene unseen PSNR ranges from 14.74 to 19.92.</p>
+
+  <h3>Findings</h3>
+  <ul>
+    <li>Unseen scenes, never trained on, are only ~0.6 dB below the seen ones at 12k (17.44 vs 18.04): the model generalizes across scenes rather than memorizing them.</li>
+    <li>Both curves are flattening (+0.3 dB seen, +0.05 dB unseen from 8k to 12k); far below per-scene quality (017 bonsai: 28.7).</li>
+  </ul>
+  <p class="source">Not yet in the research log; numbers from <code>$WORK/logs/ffgs_018_dl3dv_770.out</code>.</p>
+</section>
+
+<!-- ============================================================ -->
+<section class="obs" id="open">
+  <div class="kicker">Next</div>
+  <h2>Open questions / next</h2>
+  <ul>
+    <li>Longer-term goal: chunked reconstruction with chunk-relative PE — see <code>docs/chunking_plan.md</code>.</li>
+    <li>drop-path off for 016 → jobs 512 / 513: confirmed as the fix. Final: 512 = 015, 513 = +0.23 dB. Open: how much of that is drop-path 0 alone (a 015 at <code>drop_path=0</code> baseline was considered and not run); whether 015 itself loses something to drop-path in eval mode (not measured).</li>
+    <li>All bonsai runs end with train PSNR ≈ eval PSNR + 0.4 (~22.8 vs ~22.4): the model <strong>underfits</strong> the training views, it does not overfit. The 10 dB gap to MCMC (32.8) is capacity / representation (Gaussian count and placement, SH 1), not generalization. The old run with MCMC means as input reached 28.75, pointing at point placement / coverage.</li>
+    <li>Untried option: <code>input.pos_norm=layer</code> (LayerNorm over the PE channels).</li>
+    <li>The RoMa MLP's output is unnormalized (no norm after its last Linear); its range during training has not been measured.</li>
+    <li>LitePT's stem output is not deterministic run to run for identical inputs (likely duplicate points per voxel in spconv's hash) — affects every run; not verified.</li>
+  </ul>
+</section>
+
+<footer>Steps 1–4 and the 120-scene progress: wandb (<code>beche-radu/ffgsplat</code>) and <code>$WORK/logs</code>. Steps 5–6: <code>docs/research_log.md</code>.</footer>
+</div>
+
+<script>
+// Step-by-step SVG animations: elements with data-s="k" appear at step k, edges of the
+// current step carry moving dots. One stepper per <figure> with an svg.anim-svg.
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const FIGS = {
+    "fig-pipeline": {
+      names: ["Images", "Encoders", "Feature maps", "RoMa tracks", "Triangulation", "Projector", "LitePT → GS"],
+      steps: [
+        "<b>Input.</b> A set of images of one scene.",
+        "<b>Frozen image encoders</b> (❄️): DINOv3, a ViT, for semantics, and VGG19, a CNN, for texture.",
+        "<b>Feature maps.</b> DINOv3 gives one semantic feature map per image; VGG19 gives texture features at several scales.",
+        "<b>RoMa v2</b> uses these features to cluster the frames, detect points and match them: 2D–2D point tracks between a reference image and its neighbours.",
+        "<b>3D PCL builder.</b> With the camera poses, it samples the tracks (globally and per frame) and triangulates them into the scene point cloud.",
+        "<b>Feature projector</b> (🔥): for every 3D point, the texture and semantic features are interpolated where the point projects into the images and passed through one MLP per scale. Result: a point cloud with embeddings.",
+        "<b>LitePT</b> (🔥), a point-transformer U-Net, maps the embedded points to Gaussian splatting parameters in a single forward pass.",
+      ],
+    },
+    "step1-anim": {
+      names: ["Points", "LitePT", "Head", "Gaussians", "Render & loss", "Backprop"],
+      steps: [
+        "<b>Input.</b> The means of a converged MCMC checkpoint of bonsai. The only feature of each point is its colour (rgb); no image features, no augmentation.",
+        "<b>LitePT</b> (🔥) voxelizes the points (voxel 0.005) and processes them with a point-transformer U-Net.",
+        "<b>Per-point head</b> (🔥): for every point it predicts the rest of a Gaussian: scale (3), rotation (4), opacity (1) and SH colour (48, degree 3).",
+        "<b>Gaussians.</b> The means are not predicted: they are copied from the input. Every point becomes one Gaussian.",
+        "<b>Render and compare.</b> gsplat rasterizes the Gaussians into the training views (8 per step); the loss is L1 + SSIM (λ 0.2) against the ground-truth images.",
+        "<b>Backprop</b> updates only the network's weights. After 10k steps bonsai reaches <b>28.75 dB</b>, 4 dB below the MCMC optimization it started from (32.80).",
+      ],
+    },
+  };
+  const DUR = 3800, END_HOLD = 6000;
+
+  function stepper(fig, { names, steps }) {
+    const svg = fig.querySelector("svg.anim-svg");
+    const els = [...svg.querySelectorAll("[data-s]")];
+    const cap = fig.querySelector(".fig-caption");
+    const playBtn = fig.querySelector(".fig-play");
+    const LAST = steps.length - 1;
+    let stage = LAST, timer = null, playing = false, started = false;
+    const stepBtns = steps.map((_, i) => {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button"; b.innerHTML = `<span class="n">${i + 1}</span>${names[i]}`;
+      b.addEventListener("click", () => { pause(); show(i); });
+      li.appendChild(b); fig.querySelector(".fig-steps").appendChild(li);
+      return b;
+    });
+
+    function particles(edges) {
+      svg.querySelectorAll(".particle").forEach(p => p.remove());
+      if (reduce) return;
+      edges.forEach(path => {
+        for (let k = 0; k < 2; k++) {
+          const c = document.createElementNS(NS, "circle");
+          c.setAttribute("r", "3.6"); c.setAttribute("class", "particle"); c.setAttribute("opacity", "0");
+          const m = document.createElementNS(NS, "animateMotion");
+          m.setAttribute("dur", "1.5s"); m.setAttribute("repeatCount", "indefinite"); m.setAttribute("begin", "indefinite");
+          const mp = document.createElementNS(NS, "mpath");
+          mp.setAttribute("href", "#" + path.id);
+          m.appendChild(mp); c.appendChild(m); svg.appendChild(c);
+          setTimeout(() => { c.setAttribute("opacity", "1"); try { m.beginElement(); } catch (e) {} }, k * 750);
+        }
+      });
+    }
+
+    function show(i) {
+      stage = i;
+      svg.classList.add("playing");
+      els.forEach(el => {
+        const s = +el.dataset.s;
+        el.classList.toggle("shown", s <= i);
+        el.classList.toggle("active", s === i);
+      });
+      // restart the pop / splat animations of the current step
+      svg.querySelectorAll(".active .pop, .active .splat").forEach(el => {
+        el.style.animation = "none"; void el.getBoundingClientRect(); el.style.animation = "";
+      });
+      particles(els.filter(el => el.classList.contains("edge") && +el.dataset.s === i));
+      stepBtns.forEach((b, k) => { if (k === i) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current"); });
+      cap.innerHTML = steps[i];
+    }
+    function tick() {
+      clearTimeout(timer);
+      timer = setTimeout(() => { show(stage >= LAST ? 0 : stage + 1); if (playing) tick(); }, stage >= LAST ? END_HOLD : DUR);
+    }
+    function play() { playing = true; playBtn.textContent = "Pause"; tick(); }
+    function pause() { playing = false; clearTimeout(timer); playBtn.textContent = "Play"; }
+
+    playBtn.addEventListener("click", () => { if (playing) pause(); else { if (stage >= LAST) show(0); play(); } });
+    fig.querySelector(".fig-prev").addEventListener("click", () => { pause(); show(Math.max(0, stage - 1)); });
+    fig.querySelector(".fig-next").addEventListener("click", () => { pause(); show(Math.min(LAST, stage + 1)); });
+
+    // full figure until it scrolls into view, then play from the first step
+    show(LAST); svg.classList.remove("playing"); particles([]);
+    els.forEach(el => el.classList.remove("active"));
+    pause();
+    if (reduce) return;
+    new IntersectionObserver((entries, obs) => {
+      if (!started && entries.some(e => e.isIntersecting)) { started = true; obs.disconnect(); show(0); play(); }
+    }, { threshold: 0.4 }).observe(svg);
+  }
+
+  for (const [id, cfg] of Object.entries(FIGS)) {
+    const fig = document.getElementById(id);
+    if (fig && fig.querySelector("svg.anim-svg")) stepper(fig, cfg);
+  }
+})();
+</script>
+</body>
+</html>

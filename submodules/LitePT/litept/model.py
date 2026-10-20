@@ -10,6 +10,7 @@ import flash_attn
 import spconv.pytorch as spconv
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
 import torch_scatter
 
 from addict import Dict
@@ -671,7 +672,30 @@ class Block(PointModule):
                 DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
             )
 
+    # Gradient (activation) checkpointing: don't keep this block's intermediate
+    # activations for backward, recompute them instead (less memory, ~1 extra
+    # forward). Set from outside, e.g. `block.use_checkpoint = True`.
+    use_checkpoint = False
+
     def forward(self, point: Point):
+        if self.use_checkpoint and self.training and torch.is_grad_enabled():
+            # Only `feat` (and the sparse tensor carrying it) change inside the
+            # block; the rest of `point` (serialization, grid coords, spconv
+            # indices) is reused as is when the block reruns in backward.
+            sparse = point.sparse_conv_feat
+
+            def run(feat):
+                point.feat = feat
+                point.sparse_conv_feat = sparse.replace_feature(feat)
+                return self._forward(point).feat
+
+            feat = torch.utils.checkpoint.checkpoint(run, point.feat, use_reentrant=False)
+            point.feat = feat
+            point.sparse_conv_feat = sparse.replace_feature(feat)
+            return point
+        return self._forward(point)
+
+    def _forward(self, point: Point):
         if self.enable_conv:
             shortcut = point.feat
             point = self.conv(point)

@@ -15,6 +15,8 @@ def main():
 
     if cfg.trainer.resume:
         trainer.load_checkpoint(cfg.trainer.resume)
+    elif cfg.trainer.init_from:
+        trainer.load_weights(cfg.trainer.init_from)
     trainer.build_logger()
 
     trainer.train()

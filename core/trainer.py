@@ -4,6 +4,7 @@ import math
 import contextlib
 from datetime import timedelta
 import random
+import time
 import torch
 import numpy as np
 import itertools
@@ -28,13 +29,15 @@ from torchmetrics.image import (
 
 from data.augment import augment, max_expansion
 from data.datasets.colmap import Dataset, DatasetConfig, Parser, ParserConfig
+from data.edgs_points import feature_layout, load_edgs_points, validate_input_config
 from models.point_model import LitePtGSModel
+from models.pos_encoding import pos_channels
 
 _LITEPT_ROOT = Path(__file__).resolve().parent.parent / "submodules" / "LitePT"
 if str(_LITEPT_ROOT) not in sys.path:
     sys.path.append(str(_LITEPT_ROOT))
 
-from litept.model import Point  # noqa: E402
+from litept.model import Block, Point  # noqa: E402
 
 from typing import Any, Dict
 
@@ -143,10 +146,12 @@ class _RandomSceneBatchSampler(torch.utils.data.Sampler):
 
 @dataclass
 class Scene:
-    """One scene's data: parser, datasets, eval loader and the reference
-    Gaussians' `means` / base RGB `colors` (the model's fixed input, pinned on
-    CPU and attached to every batch from the main process, so the full cloud
-    isn't shipped through the loader workers every item)."""
+    """One scene's data: parser, datasets, eval loader and the input points'
+    `means` / per-point `feat` (the model's fixed input, pinned on CPU and
+    attached to every batch from the main process, so the full cloud isn't
+    shipped through the loader workers every item). `feat` is the base RGB,
+    followed by the standardized image features if `input.features` has any
+    (see `data.edgs_points`)."""
 
     name: str
     parser: Parser
@@ -154,7 +159,7 @@ class Scene:
     eval_dataset: Dataset
     eval_loader: DataLoader
     means: torch.Tensor
-    colors: torch.Tensor
+    feat: torch.Tensor
 
 
 @dataclass
@@ -174,6 +179,9 @@ class DataConfig:
     scenes: List[str] = field(default_factory=list)
     scene_root: Optional[str] = None
     gaussian_ckpt_template: Optional[str] = None
+    # Per-scene parser overrides on top of `parser`, e.g. a different image
+    # factor for outdoor scenes: {bicycle: {factor: 4}, ...}.
+    scene_parser: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     train_patch_size: Optional[int] = None
     train_load_depths: bool = False
@@ -299,6 +307,10 @@ class HeadConfig:
     # checkpoints have 99.9% of max-axis scales below ~0.5, a few far-background
     # ones larger.
     max_scale: float = 1.0
+    # Max |offset| per axis of the predicted position offsets added to every
+    # input point (world units, the `trainer.point_grid_size` frame); bounded
+    # by `max_offset * tanh`. 0 disables the offset head (no extra weights).
+    max_offset: float = 0.0
 
 
 @dataclass
@@ -323,6 +335,18 @@ class TrainerConfig:
     # instead of letting the WSL2/WDDM driver silently spill allocations into
     # system RAM (no OOM, just a ~100x slowdown).
     cuda_memory_fraction: Optional[float] = None
+    # Gradient (activation) checkpointing of LitePT's encoder/decoder blocks:
+    # their activations are recomputed in backward instead of stored (less
+    # memory, roughly one extra backbone forward per step). Doesn't change the
+    # model, so checkpoints resume with it on or off.
+    grad_checkpoint: bool = False
+    # Gradient accumulation: micro-batches per optimizer step. Each micro-batch
+    # is `data.train_batch_size` views of one scene (a random one with several
+    # scenes) with its own augmentation; the update uses their mean gradient,
+    # so one step sees `grad_accum_steps` x `train_batch_size` views (and up to
+    # `grad_accum_steps` scenes) at one micro-batch's memory. `num_steps`,
+    # `eval_every` and `save_every` count optimizer steps.
+    grad_accum_steps: int = 1
     num_steps: int = 100
     # Evaluate on the full eval split every this many steps (and at the last step).
     eval_every: int = 1000
@@ -338,6 +362,10 @@ class TrainerConfig:
     output_dir: str = "results/run"
     # Path to a `<output_dir>/ckpts/step_*.pt` full checkpoint to resume from.
     resume: Optional[str] = None
+    # Path to a `ckpts/step_*.pt` or `weights/step_*.pt` file to start from:
+    # model weights only. Optimizer, LR schedule, step counter and wandb run
+    # start fresh (to continue a finished run for more steps). Ignored with `resume`.
+    init_from: Optional[str] = None
     # Log train metrics (stdout + wandb) every this many steps.
     log_train_steps: int = 5
     # Log one random view of the batch (GT | render, side by side) to wandb
@@ -356,6 +384,13 @@ class TrainerConfig:
     # transparent / small as the render loss allows. 0 disables.
     opacity_reg: float = 0.0
     scale_reg: float = 0.0
+    # Penalty on oversized Gaussians only: weight on the summed excess of each
+    # activated scale axis over `scale_tail_threshold` (scene units). Gaussians
+    # below the threshold get no gradient from it, unlike `scale_reg`. Summed,
+    # not averaged: a mean over ~1M Gaussians would spread the push on the few
+    # large ones to nothing. 0 disables.
+    scale_tail_reg: float = 0.0
+    scale_tail_threshold: float = 0.1
     # Composite each training render over a random solid color (per view)
     # instead of black, so Gaussians can't lean on a black background for
     # dark/empty regions. Eval always renders over black.
@@ -425,6 +460,13 @@ class Trainer:
         self.multi_scene = bool(cfg.data.scenes)
         self.train_loader = None
 
+        # Model input: `direct_channels` (rgb) + image feature blocks, the latter
+        # through the model's feature MLP. `feature_channels` is known once the
+        # scenes are loaded (`_build_scene`).
+        validate_input_config(cfg.input)
+        self.direct_channels, self.feature_blocks = feature_layout(cfg.input)
+        self.feature_channels = None
+
         self.step = 0
         self.start_step = 0
         self.best_metric = None
@@ -432,13 +474,47 @@ class Trainer:
         self.wandb_run_id = None
 
     def build_model(self):
+        if self.feature_channels is None:
+            raise RuntimeError("build_dataloaders() must run before build_model()")
+        # LitePT's input width follows from `input`: rgb (3) and/or the feature MLP's
+        # output, plus the positional encoding when it is concatenated to the input.
+        in_cfg = self.cfg.input
+        in_channels = self.direct_channels + (in_cfg.feature_mlp_dim if self.feature_channels else 0)
+        if in_cfg.pos_encoding != "none":
+            # The encoding is centered at the scene origin and scaled by the
+            # points' spread: only meaningful in the normalized frame.
+            parser_cfgs = [self.cfg.data.parser, *self.cfg.data.scene_parser.values()]
+            if not all(OmegaConf.select(OmegaConf.merge(self.cfg.data.parser, c), "normalize") for c in parser_cfgs):
+                raise ValueError("input.pos_encoding needs data.parser.normalize=true (for every scene)")
+            if in_cfg.pos_inject in ("input", "both"):
+                in_channels += pos_channels(in_cfg.pos_freqs, in_cfg.pos_include_raw)
+        if self.cfg.model.in_channels != in_channels:
+            print(f"model.in_channels: {self.cfg.model.in_channels} -> {in_channels} (from input.features)")
+            self.cfg.model.in_channels = in_channels
         self.model = LitePtGSModel(
             backbone_cfg=OmegaConf.to_container(self.cfg.model, resolve=True),
             sh_degree=self.cfg.head.sh_degree,
             init_scale=self.cfg.head.init_scale,
             init_opacity=self.cfg.head.init_opacity,
             max_scale=self.cfg.head.max_scale,
+            max_offset=self.cfg.head.max_offset,
+            direct_channels=self.direct_channels,
+            feature_channels=self.feature_channels,
+            feature_mlp_dim=self.cfg.input.feature_mlp_dim,
+            feature_mlp_layers=self.cfg.input.feature_mlp_layers,
+            pos_encoding=in_cfg.pos_encoding,
+            pos_freqs=in_cfg.pos_freqs,
+            pos_percentile=in_cfg.pos_percentile,
+            pos_include_raw=in_cfg.pos_include_raw,
+            pos_inject=in_cfg.pos_inject,
+            pos_norm=in_cfg.pos_norm,
+            pos_clamp_percentile=in_cfg.pos_clamp_percentile,
         ).to(self.device)
+        if self.cfg.trainer.grad_checkpoint:
+            blocks = [m for m in self.model.backbone.modules() if isinstance(m, Block)]
+            for block in blocks:
+                block.use_checkpoint = True
+            print(f"Gradient checkpointing: {len(blocks)} LitePT blocks")
         # Start every rank from rank 0's weights.
         if self.world_size > 1:
             for t in itertools.chain(self.model.parameters(), self.model.buffers()):
@@ -448,15 +524,22 @@ class Trainer:
         # The model's weights are the only trainable parameters; `means` are a
         # fixed input.
         opt_cfg = self.cfg.optimizer
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=opt_cfg.lr, weight_decay=opt_cfg.weight_decay
-        )
+        if opt_cfg.name == "adamw":
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(), lr=opt_cfg.lr, weight_decay=opt_cfg.weight_decay
+            )
+            max_lr = opt_cfg.lr
+        elif opt_cfg.name == "muon":
+            self.optimizer, max_lr = self._build_muon(opt_cfg)
+        else:
+            raise ValueError(f"optimizer.name must be adamw or muon, got {opt_cfg.name!r}")
         # Linear warmup from `warmup_start_ratio * lr` to `lr` over the first
         # `warmup_pct` of training, then cosine decay to `final_lr_ratio * lr`.
-        # Stepped once per training step. Adam's betas are left fixed.
+        # Stepped once per training step. Adam's betas / Muon's momentum are
+        # left fixed. `max_lr` is per param group with Muon.
         self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
             self.optimizer,
-            max_lr=opt_cfg.lr,
+            max_lr=max_lr,
             total_steps=self.cfg.trainer.num_steps,
             pct_start=opt_cfg.warmup_pct,
             anneal_strategy="cos",
@@ -465,16 +548,69 @@ class Trainer:
             final_div_factor=opt_cfg.warmup_start_ratio / opt_cfg.final_lr_ratio,
         )
 
+    def _build_muon(self, opt_cfg):
+        """Muon on the hidden `nn.Linear` weights of the backbone and feature
+        MLP; AdamW (same betas / eps as `torch.optim.AdamW`) on everything else:
+        biases and norms (1-D), the sparse-conv kernels (5-D; Muon would
+        orthogonalize their last two dims only), the feature MLP's first layer
+        (input layer) and the GS head (output layer, carries the init scale /
+        opacity in its bias). Returns the optimizer and the per-group peak LRs.
+        Groups: [adamw, muon, muon qkv]."""
+        from others.muon_optimizer import Muon
+
+        model = self.model
+        hidden = []  # (name, nn.Linear) whose weight goes to Muon
+        for name, m in model.backbone.named_modules():
+            if isinstance(m, nn.Linear):
+                hidden.append((f"backbone.{name}", m))
+        if model.feature_mlp is not None:
+            linears = [(f"feature_mlp.{n}", m) for n, m in model.feature_mlp.named_modules() if isinstance(m, nn.Linear)]
+            hidden += linears[1:]
+        # Fused Q/K/V (`Linear(C, 3C)`): orthogonalize each C x C block on its own.
+        qkv = [m.weight for n, m in hidden if n.endswith(".qkv")]
+        muon = [m.weight for n, m in hidden if not n.endswith(".qkv")]
+        muon_ids = {id(p) for p in qkv + muon}
+        adamw = [p for p in model.parameters() if id(p) not in muon_ids]
+
+        muon_lr = opt_cfg.muon_lr if opt_cfg.muon_lr is not None else opt_cfg.lr
+        muon_group = dict(
+            use_muon=True,
+            lr=muon_lr,
+            weight_decay=opt_cfg.weight_decay,
+            momentum=opt_cfg.muon_momentum,
+            polar_express_steps=opt_cfg.muon_polar_steps,
+            update_scale=opt_cfg.muon_update_scale,
+        )
+        groups = [
+            dict(params=adamw, use_muon=False, lr=opt_cfg.lr, weight_decay=opt_cfg.weight_decay),
+            dict(params=muon, **muon_group),
+            dict(params=qkv, muon_chunks=3, **muon_group),
+        ]
+        optimizer = Muon(groups, adamw_betas=(0.9, 0.999), adamw_eps=1e-8)
+        optimizer.set_parameter_names(model.named_parameters())
+        if self.is_main:
+            count = lambda ps: sum(p.numel() for p in ps)
+            print(
+                f"Muon: {len(muon) + len(qkv)} matrices ({len(qkv)} fused qkv), "
+                f"{count(muon + qkv) / 1e6:.2f}M params, lr {muon_lr:g}, update_scale {opt_cfg.muon_update_scale}; "
+                f"AdamW: {len(adamw)} tensors, {count(adamw) / 1e6:.2f}M params, lr {opt_cfg.lr:g}"
+            )
+        return optimizer, [opt_cfg.lr, muon_lr, muon_lr]
+
     def build_dataloaders(self):
         data_cfg = self.cfg.data
         if self.multi_scene:
-            if not data_cfg.scene_root or not data_cfg.gaussian_ckpt_template:
-                raise ValueError("data.scenes needs data.scene_root and data.gaussian_ckpt_template")
+            mcmc = self.cfg.input.source == "mcmc"
+            if not data_cfg.scene_root or (mcmc and not data_cfg.gaussian_ckpt_template):
+                raise ValueError("data.scenes needs data.scene_root (and data.gaussian_ckpt_template with input.source=mcmc)")
+            unknown = set(data_cfg.scene_parser) - set(data_cfg.scenes)
+            if unknown:
+                raise ValueError(f"data.scene_parser has scenes not in data.scenes: {sorted(unknown)}")
             self.scenes = [
                 self._build_scene(name, OmegaConf.merge(data_cfg.parser, {
                     "data_dir": str(Path(data_cfg.scene_root) / name),
-                    "gaussian_ckpt_path": data_cfg.gaussian_ckpt_template.format(scene=name),
-                }))
+                    "gaussian_ckpt_path": data_cfg.gaussian_ckpt_template.format(scene=name) if mcmc else None,
+                }, data_cfg.scene_parser.get(name, {})))
                 for name in data_cfg.scenes
             ]
             # A random scene per batch (per rank); endless, so no epochs.
@@ -530,33 +666,68 @@ class Trainer:
             drop_last=data_cfg.eval_drop_last,
         )
 
-        if parser.gaussian_means is None:
-            raise ValueError(f"{name}: data.parser.gaussian_ckpt_path must be set")
+        # Input points: the reference checkpoint's Gaussians (mcmc) or the EDGS
+        # initialization (edgs, already in the parser's normalized frame).
+        image_feat = None
+        if self.cfg.input.source == "edgs":
+            edgs_dir = self.cfg.input.edgs_dir.format(scene=name)
+            input_cfg = self.cfg.input
+            if name in input_cfg.scene_max_points:
+                input_cfg = OmegaConf.merge(input_cfg, {"max_points": input_cfg.scene_max_points[name]})
+            edgs = load_edgs_points(input_cfg, edgs_dir, parser, train_dataset.indices)
+            means, image_feat = edgs["means"], edgs["features"]
+            rgb = torch.from_numpy(edgs["rgb"])
+            info = edgs["info"]
+            print(
+                f"[{name}] EDGS points from {edgs_dir}: {info['num_used']} used of "
+                f"{info['num_valid']} valid / {info['num_total']}; reprojection into the "
+                f"reference view: median {info['align_median_px']:.2f} px, p90 {info['align_p90_px']:.2f} px"
+                + (f"; features {edgs['feature_dims']}" if edgs["feature_dims"] else "")
+            )
+        else:
+            if parser.gaussian_means is None:
+                raise ValueError(f"{name}: data.parser.gaussian_ckpt_path must be set")
+            means = parser.gaussian_means
 
-        # Drop far-away outlier Gaussians (MCMC puts a few up to ~9000 units out on bonsai)
+        # Drop far-away outlier points (MCMC puts a few up to ~9000 units out on bonsai)
         # so the voxelized cloud fits LitePT's serialization limit of 2^16 voxels
-        # per axis (`Point.serialization`'s `depth <= 16` assert). All `gaussian_*`
+        # per axis (`Point.serialization`'s `depth <= 16` assert). All per-point
         # arrays are filtered with the same mask to stay aligned.
-        means = parser.gaussian_means
         half_extent = (2**16 - 1) * self.cfg.trainer.point_grid_size / 2
         # Training augmentation can rotate/scale the cloud (and shift the grid
         # by up to a voxel), so leave room for its worst-case extent.
         if self.cfg.augment.enabled:
             half_extent = (half_extent - self.cfg.trainer.point_grid_size) / max_expansion(self.cfg.augment)
         keep = (np.abs(means - np.median(means, axis=0)) < half_extent).all(axis=1)
-        for attr_name in ("means", "scales", "quats", "opacities", "sh0", "shN"):
-            attr = f"gaussian_{attr_name}"
-            setattr(parser, attr, getattr(parser, attr)[keep])
-        print(f"[{name}] Removed {(~keep).sum()} / {len(keep)} outlier Gaussians")
+        print(f"[{name}] Removed {(~keep).sum()} / {len(keep)} outlier points")
 
-        means = torch.from_numpy(parser.gaussian_means).float()
-        # Degree-0 SH to RGB: `sh0 * C0 + 0.5`, with C0 the l=0 SH basis constant.
-        sh0 = torch.from_numpy(parser.gaussian_sh0).float()[:, 0, :]
-        colors = (sh0 * 0.28209479177387814 + 0.5).clamp(0.0, 1.0)
+        if self.cfg.input.source == "edgs":
+            means = torch.from_numpy(means[keep])
+            rgb = rgb[torch.from_numpy(keep)]
+        else:
+            for attr_name in ("means", "scales", "quats", "opacities", "sh0", "shN"):
+                attr = f"gaussian_{attr_name}"
+                setattr(parser, attr, getattr(parser, attr)[keep])
+            means = torch.from_numpy(parser.gaussian_means).float()
+            # Degree-0 SH to RGB: `sh0 * C0 + 0.5`, with C0 the l=0 SH basis constant.
+            sh0 = torch.from_numpy(parser.gaussian_sh0).float()[:, 0, :]
+            rgb = (sh0 * 0.28209479177387814 + 0.5).clamp(0.0, 1.0)
+
+        parts = [rgb] if self.direct_channels else []
+        if image_feat is not None:
+            parts.append(torch.from_numpy(image_feat[keep]))
+        feat = torch.cat(parts, dim=1) if len(parts) > 1 else parts[0]
+
+        # Every scene must give the model the same input width.
+        channels = 0 if image_feat is None else image_feat.shape[1]
+        if self.feature_channels is not None and channels != self.feature_channels:
+            raise ValueError(f"[{name}] {channels} feature channels, other scenes have {self.feature_channels}")
+        self.feature_channels = channels
+
         if self.device.type == "cuda":
             means = means.pin_memory()
-            colors = colors.pin_memory()
-        return Scene(name, parser, train_dataset, eval_dataset, eval_loader, means, colors)
+            feat = feat.pin_memory()
+        return Scene(name, parser, train_dataset, eval_dataset, eval_loader, means, feat)
 
     def train(self):
         train_iter = self._train_batches()
@@ -570,26 +741,47 @@ class Trainer:
         self.lpips = self.lpips.to(self.device)
 
         num_steps = self.cfg.trainer.num_steps
+        if self.cfg.trainer.grad_accum_steps < 1:
+            raise ValueError(f"trainer.grad_accum_steps must be >= 1, got {self.cfg.trainer.grad_accum_steps}")
         for self.step in range(self.start_step, num_steps):
-            batch = next(train_iter)
-            scene = self.scenes[int(batch["scene"][0])] if "scene" in batch else self.scenes[0]
-            batch["means"] = scene.means
-            batch["colors"] = scene.colors
-            metrics = self.train_step(batch)
+            batches = []
+            for _ in range(self.cfg.trainer.grad_accum_steps):
+                batch = next(train_iter)
+                scene = self.scenes[int(batch["scene"][0])] if "scene" in batch else self.scenes[0]
+                batch["means"], batch["feat"] = self._train_points(scene)
+                batches.append(batch)
+            start = time.perf_counter()
+            metrics = self.train_step(batches)
+            # Wall time of the update (loading excluded, GPU synced by `.item()`s).
+            metrics["step_time"] = time.perf_counter() - start
             self.log(metrics, self.step)
 
             # Eval split by scene over the ranks (a single scene: rank 0 only);
             # checkpoints on rank 0 only. The others wait.
             if (self.step + 1) % self.cfg.trainer.eval_every == 0 or self.step == num_steps - 1:
+                # Eval has a different memory layout (whole cloud, no grad): hand
+                # the training step's cached blocks back first, and the eval's after.
+                self._empty_cuda_cache()
                 self.model.eval()
                 self.eval()
                 self.model.train()
+                self._empty_cuda_cache()
                 self._barrier()
 
             if (self.step + 1) % self.cfg.trainer.save_every == 0 or self.step == num_steps - 1:
                 if self.is_main:
                     self.save_checkpoint()
                 self._barrier()
+
+    def _empty_cuda_cache(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+
+    def _train_points(self, scene):
+        """Input points (means, feat) of one training micro-batch: the scene's
+        fixed cloud. `core.trainer_dl3dv` draws a random subset instead."""
+        return scene.means, scene.feat
 
     def _train_batches(self):
         # Re-iterate the loader each epoch (reshuffles). `itertools.cycle` would
@@ -599,10 +791,79 @@ class Trainer:
                 self.train_sampler.set_epoch(epoch)
             yield from self.train_loader
 
-    def train_step(self, batch):
+    def train_step(self, batches):
+        """One optimizer update from `len(batches)` micro-batches (gradient
+        accumulation, `trainer.grad_accum_steps`): each micro-batch's gradient
+        is added with weight 1/len(batches), so the update sees the mean over
+        all of them, i.e. the same gradient as one big batch of all their views
+        and scenes, at one micro-batch's peak memory."""
         torch.cuda.reset_peak_memory_stats(self.device)
+        self.optimizer.zero_grad(set_to_none=True)
+        weight = 1.0 / len(batches)
+        parts = [self._forward_backward(batch, weight, log_image=j == 0) for j, batch in enumerate(batches)]
+
+        def mean(key):
+            return sum(p[key] for p in parts) / len(parts)
+
+        l1_sum, ssim_sum, mse_sum, loss_sum = mean("l1"), mean("ssim"), mean("mse"), mean("loss")
+        if self.world_size > 1:
+            # Average over ranks before clipping, so the clip and the update
+            # see the full batch's gradient.
+            self._all_reduce_grads()
+            # Batch means over all ranks, for logging.
+            l1_sum, ssim_sum, mse_sum, loss_sum = self._all_reduce_mean([l1_sum, ssim_sum, mse_sum, loss_sum])
+        if self.cfg.optimizer.grad_clip > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.cfg.optimizer.grad_clip
+            ).item()
+        else:
+            grad_norm = float("nan")
+        lr = self.scheduler.get_last_lr()[0]
+        self.optimizer.step()
+        self.scheduler.step()
+
+        metrics = {
+            "loss": loss_sum,
+            "l1": l1_sum,
+            "ssim": ssim_sum,
+            "psnr": -10.0 * math.log10(mse_sum),
+            "lr": lr,
+            "grad_norm": grad_norm,
+            "sh_degree": parts[0]["sh_degree"],
+            "reg": mean("reg"),
+            # Mean / max activated scale and mean opacity, to watch for
+            # oversized Gaussians.
+            "scale_mean": mean("scale_mean"),
+            "scale_max": max(p["scale_max"] for p in parts),
+            # Gaussians with any axis above the tail threshold.
+            "scale_num_big": mean("scale_num_big"),
+            "opacity_mean": mean("opacity_mean"),
+            **({k: mean(k) for k in ("offset_abs_mean", "offset_sat_frac")} if "offset_abs_mean" in parts[0] else {}),
+            **({k: mean(k) for k in ("pos_radius", "pe_proj_norm") if k in parts[0]}),
+            "mem_gib": torch.cuda.max_memory_allocated(self.device) / 2**30,
+            # Peak held by the caching allocator (allocated + cached blocks); the
+            # number to compare against the card's capacity.
+            "mem_reserved_gib": torch.cuda.max_memory_reserved(self.device) / 2**30,
+        }
+        if self.cfg.optimizer.name == "muon" and self.step % self.cfg.trainer.log_train_steps == 0:
+            # Muon's polar guard, since the last logged step: matrix updates left
+            # out (non-finite / oversized polar factor; each is also logged as a
+            # warning) and the largest RMS singular value applied (~1 when healthy).
+            report = self.optimizer.pop_guard_report()
+            if report is not None:
+                metrics["muon_skipped"] = sum(report["skipped"].values())
+                metrics["muon_peak_rms"] = report["peak_rms"]
+        if parts[0]["image"] is not None:
+            metrics["image"] = parts[0]["image"]
+            metrics["image_scene"] = self.scenes[int(batches[0]["scene"][0])].name if self.multi_scene else None
+        return metrics
+
+    def _forward_backward(self, batch, weight, log_image):
+        """Forward + backward of one micro-batch (`train_batch_size` views of one
+        scene); adds `weight` x its gradient to the model's `.grad`. Returns its
+        loss terms / stats for logging."""
         coord = batch["means"].to(self.device, non_blocking=True)
-        feat = batch["colors"].to(self.device, non_blocking=True)
+        feat = batch["feat"].to(self.device, non_blocking=True)
         camtoworlds = batch["camtoworld"].to(self.device, non_blocking=True)  # [B, 4, 4]
         # Random similarity transform of points + cameras (identity if
         # `augment.enabled` is False); renders are unchanged, so the targets are.
@@ -630,6 +891,9 @@ class Trainer:
         colors = torch.cat([leaves["sh0"], leaves["shN"]], dim=1)
         scales = torch.exp(leaves["scales"])
         opacities = torch.sigmoid(leaves["opacities"])
+        # Predicted offsets move the Gaussians off their input points; `coord`
+        # itself is fixed input (no gradient).
+        means = coord + leaves["offsets"] if "offsets" in leaves else coord
 
         Ks = batch["K"].to(self.device, non_blocking=True)                    # [B, 3, 3]
         pixels = batch["image"].to(self.device, non_blocking=True) / 255.0    # [B, H, W, 3]
@@ -639,7 +903,7 @@ class Trainer:
         # One random view of the batch to log as an image this step (-1: none).
         image_view = (
             random.randrange(num_views)
-            if self.step % self.cfg.trainer.log_train_images_steps == 0
+            if log_image and self.step % self.cfg.trainer.log_train_images_steps == 0
             else -1
         )
         image = None
@@ -652,6 +916,9 @@ class Trainer:
             reg = reg + self.cfg.trainer.opacity_reg * opacities.mean()
         if self.cfg.trainer.scale_reg > 0.0:
             reg = reg + self.cfg.trainer.scale_reg * scales.mean()
+        if self.cfg.trainer.scale_tail_reg > 0.0:
+            excess = F.relu(scales - self.cfg.trainer.scale_tail_threshold)
+            reg = reg + self.cfg.trainer.scale_tail_reg * excess.sum()
         if reg.requires_grad:
             reg.backward(retain_graph=True)
 
@@ -659,7 +926,7 @@ class Trainer:
         l1_sum = ssim_sum = mse_sum = 0.0
         for i in range(num_views):
             render, alpha, _ = rasterization(
-                means=coord,
+                means=means,
                 quats=leaves["quats"],  # normalized inside `rasterization`
                 scales=scales,
                 opacities=opacities,
@@ -693,49 +960,49 @@ class Trainer:
                 image = torch.cat([gt[0], render[0].detach().clamp(0.0, 1.0)], dim=1)  # [H, 2W, 3]
                 image = (image * 255.0).byte().cpu().numpy()
 
-        self.optimizer.zero_grad(set_to_none=True)
+        # Accumulates into `.grad` (zeroed once per update in `train_step`).
         torch.autograd.backward(
-            list(splats.values()), [leaves[k].grad for k in splats]
+            list(splats.values()), [leaves[k].grad * weight for k in splats]
         )
-        if self.world_size > 1:
-            # Average over ranks before clipping, so the clip and the update
-            # see the full batch's gradient.
-            self._all_reduce_grads()
-            # Batch means over all ranks, for logging.
-            l1_sum, ssim_sum, mse_sum, loss_sum = self._all_reduce_mean([l1_sum, ssim_sum, mse_sum, loss_sum])
-        if self.cfg.optimizer.grad_clip > 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.cfg.optimizer.grad_clip
-            ).item()
-        else:
-            grad_norm = float("nan")
-        lr = self.scheduler.get_last_lr()[0]
-        self.optimizer.step()
-        self.scheduler.step()
-
-        metrics = {
+        return {
             "loss": loss_sum,
             "l1": l1_sum,
             "ssim": ssim_sum,
-            "psnr": -10.0 * math.log10(mse_sum),
-            "lr": lr,
-            "grad_norm": grad_norm,
-            "sh_degree": sh_degree,
+            "mse": mse_sum,
             "reg": reg.item(),
-            # Mean / max activated scale and mean opacity, to watch for
-            # oversized Gaussians.
+            "sh_degree": sh_degree,
             "scale_mean": scales.detach().mean().item(),
             "scale_max": scales.detach().max().item(),
+            "scale_num_big": (
+                (scales.detach().amax(dim=-1) > self.cfg.trainer.scale_tail_threshold).sum().item()
+            ),
             "opacity_mean": opacities.detach().mean().item(),
-            "mem_gib": torch.cuda.max_memory_allocated(self.device) / 2**30,
-            # Peak held by the caching allocator (allocated + cached blocks); the
-            # number to compare against the card's capacity.
-            "mem_reserved_gib": torch.cuda.max_memory_reserved(self.device) / 2**30,
+            **self._offset_stats(splats),
+            **self._pos_stats(),
+            "image": image,
         }
-        if image is not None:
-            metrics["image"] = image
-            metrics["image_scene"] = self.scenes[int(batch["scene"][0])].name if self.multi_scene else None
-        return metrics
+
+    def _offset_stats(self, splats):
+        """Mean |offset| and the fraction of offset components near the
+        `max_offset` bound (saturated tanh: the bound may be too tight)."""
+        if "offsets" not in splats:
+            return {}
+        off = splats["offsets"].detach().abs()
+        return {
+            "offset_abs_mean": off.mean().item(),
+            "offset_sat_frac": (off > 0.95 * self.cfg.head.max_offset).float().mean().item(),
+        }
+
+    def _pos_stats(self):
+        """Positional encoding's divider `r` of this forward (the augmented
+        cloud's percentile radius) and, with `pos_inject` embed/both, the norm
+        of the zero-initialized PE projection (grows as PE gets used)."""
+        stats = {}
+        if self.model.pos_radius is not None:
+            stats["pos_radius"] = self.model.pos_radius.item()
+        if self.model.pe_proj is not None:
+            stats["pe_proj_norm"] = self.model.pe_proj.weight.detach().norm().item()
+        return stats
 
     @torch.no_grad()
     def eval(self):
@@ -787,14 +1054,14 @@ class Trainer:
         coord = scene.means.to(self.device, non_blocking=True)
         point = Point(
             coord=coord,
-            feat=scene.colors.to(self.device, non_blocking=True),
+            feat=scene.feat.to(self.device, non_blocking=True),
             grid_size=self.cfg.trainer.point_grid_size,
             offset=torch.tensor([coord.shape[0]], device=self.device),
         )
         with bn_batch_stats(self.model, self.cfg.trainer.eval_bn_batch_stats):
             splats = self.model(point)
         splats = {
-            "means": coord,
+            "means": coord + splats["offsets"] if "offsets" in splats else coord,
             "quats": splats["quats"],
             "scales": torch.exp(splats["scales"]),
             "opacities": torch.sigmoid(splats["opacities"]),
@@ -880,7 +1147,7 @@ class Trainer:
         if step % self.cfg.trainer.log_train_steps == 0:
             print(f"[step {step}] { {k: v for k, v in metrics.items() if k not in ('image', 'image_scene')} }")
             self.logger.log(
-                {"step": step, **{f"train/{k}": metrics[k] for k in ("loss", "l1", "ssim", "psnr", "lr", "reg", "scale_mean", "scale_max", "opacity_mean", "mem_gib", "mem_reserved_gib")}}
+                {"step": step, **{f"train/{k}": metrics[k] for k in ("loss", "l1", "ssim", "psnr", "lr", "reg", "scale_mean", "scale_max", "scale_num_big", "opacity_mean", "offset_abs_mean", "offset_sat_frac", "mem_gib", "mem_reserved_gib", "step_time", "muon_skipped", "muon_peak_rms") if k in metrics}}
             )
         if "image" in metrics:
             caption = f"{metrics['image_scene']} | GT | render" if metrics.get("image_scene") else "GT | render"
@@ -932,8 +1199,12 @@ class Trainer:
             ("data", "scenes"),
             ("data", "scene_root"),
             ("data", "gaussian_ckpt_template"),
+            ("data", "scene_parser"),
             ("model", None),
             ("head", None),
+            # Which points / features the model sees (older checkpoints get the
+            # defaults: mcmc + rgb).
+            ("input", None),
             # The LR schedule is laid out over `num_steps` with these settings.
             ("trainer", "num_steps"),
             *(("optimizer", k) for k in current["optimizer"] if k in saved["optimizer"]),
@@ -970,6 +1241,25 @@ class Trainer:
             np.random.set_state(rng["numpy"])
             random.setstate(rng["python"])
         print(f"Resumed from {path} at step {self.start_step}")
+
+    def load_weights(self, path):
+        """Load model weights alone (from `save_checkpoint`'s `ckpts/` or
+        `weights/` file); the rest of the training state stays fresh. Call
+        after `build_model`."""
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        state = ckpt["model"] if "model" in ckpt and "optimizer" in ckpt else ckpt
+        # The model input depends on these (a full checkpoint carries its config).
+        if "config" in ckpt:
+            defaults = OmegaConf.structured(OmegaConf.get_type(self.cfg))
+            saved = OmegaConf.to_container(OmegaConf.merge(defaults, ckpt["config"]), resolve=True)
+            current = OmegaConf.to_container(self.cfg, resolve=True)
+            for section, key in (("trainer", "point_grid_size"), ("data", "parser"), ("data", "scene_parser"), ("model", None), ("head", None), ("input", None)):
+                old = saved[section] if key is None else saved[section][key]
+                new = current[section] if key is None else current[section][key]
+                if old != new:
+                    raise ValueError(f"Config mismatch on init_from for {section}{'.' + key if key else ''}: {old} != {new}")
+        self.model.load_state_dict(state)
+        print(f"Initialized model weights from {path}")
 
     # ---- data parallel helpers (no-ops / unused with a single process) --------
 
