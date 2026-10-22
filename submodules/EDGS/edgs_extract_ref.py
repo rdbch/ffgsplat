@@ -20,18 +20,31 @@ Output:
         ref_uv   (N, 2)  float32  reference pixel, normalized [-1, 1] (x, y)
         valid    (N,)    bool     passed the reprojection test (False rows have zero
                                   opacity in the PLY)
+        is_sky   (N,)    bool     only with --sky: True for the sky rows (appended last)
     features_meta.json                        block spans, basis path + hash, camera
-                                              names, settings, sanity checks
+                                              names, settings, sanity checks ("sky" entry
+                                              with --sky)
     cfg_args, cameras.json, input.ply          written by / for 3DGS tooling
 
 Row i of every array is row i of the PLY (checked against the PLY xyz before saving):
 COLMAP SfM points are always removed and invalid points are kept (flagged in `valid`),
 so nothing shifts rows. Uncompressed: np.load reads each array lazily, on access.
+
+--sky adds a third step after the points (`add_sky_points`): a sphere of fake points
+around the scene, at sky_sigma_k x sigma of one Gaussian fitted to the valid points
+(centre = their mean, sigma = sqrt(tr(Sigma) / 3)), Fibonacci lattice of sky_points
+points, its voxel size g set so that occupied voxels hold sky_points_per_voxel points
+on average (stored in the meta). Sky points no training view sees are dropped; a
+greedy set cover picks the minimum set of views seeing the rest, and each sky point's
+reference view is the chosen view where it's most central. rgb + features are sampled
+there exactly as for the points (occlusion ignored). PLY rows: rgb as f_dc, scale g / 2,
+identity rotation, the median opacity of the valid points.
 """
 
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import time
@@ -46,6 +59,7 @@ for _p in (REPO_ROOT,
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
 from scene import Scene, GaussianModel  # noqa: E402
@@ -100,6 +114,12 @@ def parse_args(argv=None):
     ft.add_argument("--pca_basis", required=True,
                     help="Global basis from edgs_fit_pca.py. Its blocks decide which "
                          "RoMa strides are sampled.")
+
+    sky = p.add_argument_group("sky points (third step, see the module docstring)")
+    sky.add_argument("--sky", action="store_true", help="Append sky points (is_sky = True).")
+    sky.add_argument("--sky_sigma_k", type=float, default=4.0, help="Sphere radius in sigmas.")
+    sky.add_argument("--sky_points", type=int, default=200_000, help="Lattice points before culling.")
+    sky.add_argument("--sky_points_per_voxel", type=float, default=4.0)
 
     misc = p.add_argument_group("misc")
     misc.add_argument("--seed", type=int, default=228)
@@ -209,6 +229,140 @@ def init_with_ref_features(gaussians, scene, cfg, roma_model, device, extractor,
     return record, selected_indices, float(np.mean(uv_check))
 
 
+def project(cam, xyz):
+    """World points -> (uv in [-1, 1] (x, y), the ref_uv convention; camera depth)."""
+    ph = torch.cat([xyz, torch.ones_like(xyz[:, :1])], 1)
+    pc = ph @ cam.world_view_transform.to(xyz)        # 3DGS stores W2C transposed
+    z = pc[:, 2]
+    uv = torch.stack([pc[:, 0] / math.tan(cam.FoVx / 2), pc[:, 1] / math.tan(cam.FoVy / 2)], 1)
+    return uv / z.clamp_min(1e-9)[:, None], z
+
+
+def fibonacci_sphere(n, centre, radius):
+    i = torch.arange(n, dtype=torch.float64, device=centre.device)
+    y = 1 - 2 * (i + 0.5) / n
+    r = torch.sqrt(1 - y * y)
+    t = i * math.pi * (3 - math.sqrt(5))
+    return centre + radius * torch.stack([r * torch.cos(t), y, r * torch.sin(t)], 1)
+
+
+def sky_voxel_size(sky, origin, radius, ppv):
+    """g such that occupied voxels hold `ppv` points on average (bisection; the
+    mean grows with g). Returns (g, nominal R * sqrt(4 pi ppv / n), measured mean)."""
+    n = sky.shape[0]
+    mean = lambda g: n / torch.unique(torch.floor((sky - origin) / g).long(), dim=0).shape[0]
+    nominal = radius * math.sqrt(4 * math.pi * ppv / n)
+    lo, hi = nominal / 4, nominal * 4
+    for _ in range(30):
+        g = math.sqrt(lo * hi)
+        lo, hi = (g, hi) if mean(g) < ppv else (lo, g)
+    g = math.sqrt(lo * hi)
+    return g, nominal, mean(g)
+
+
+def add_sky_points(gaussians, record, cameras, extractor, pca, args, device):
+    """Third step (--sky): append sky points to `gaussians` and `record` (see the
+    module docstring); adds record["is_sky"]. Returns the meta's "sky" entry."""
+    valid, n_old = record["valid"], len(record["valid"])
+
+    # The projection below must agree with the points' reference pixels.
+    rng = np.random.default_rng(0)
+    rows = rng.choice(np.flatnonzero(valid), size=min(20_000, int(valid.sum())), replace=False)
+    errs = []
+    for cam_idx in np.unique(record["ref_cam"][rows]):
+        sel = rows[record["ref_cam"][rows] == cam_idx]
+        cam = cameras[cam_idx]
+        uv, _ = project(cam, torch.from_numpy(record["xyz"][sel]).double().to(device))
+        d = (uv.cpu().numpy() - record["ref_uv"][sel]) * 0.5 * np.array([cam.image_width, cam.image_height])
+        errs.append(np.linalg.norm(d, axis=1))
+    align_px = float(np.median(np.concatenate(errs)))
+    print(f"      projection vs ref_uv of the points: median {align_px:.3f} px")
+    if not align_px <= 2.0:
+        raise RuntimeError(f"sky: projection disagrees with ref_uv ({align_px:.2f} px)")
+
+    # Sphere + voxel size.
+    pts = torch.from_numpy(record["xyz"][valid]).double().to(device)
+    centre = pts.mean(0)
+    sigma = float(torch.sqrt(((pts - centre) ** 2).sum(1).mean() / 3))
+    radius = args.sky_sigma_k * sigma
+    outside = float(((pts - centre).norm(dim=1) > radius).double().mean())
+    sky = fibonacci_sphere(args.sky_points, centre, radius)
+    origin = centre - radius
+    g, g_nominal, ppv = sky_voxel_size(sky, origin, radius, args.sky_points_per_voxel)
+    print(f"      sigma {sigma:.4f}, R = {args.sky_sigma_k:g} sigma = {radius:.4f} "
+          f"({100 * outside:.2f} % of the valid points outside); voxel {g:.5f} "
+          f"(nominal {g_nominal:.5f}), {ppv:.2f} points / voxel")
+
+    # Frustum cull, then the minimum set of views (greedy set cover).
+    vis = torch.zeros(len(cameras), args.sky_points, dtype=torch.bool, device=device)
+    for i, cam in enumerate(cameras):
+        uv, z = project(cam, sky)
+        vis[i] = (z > 0) & (uv.abs() <= 1).all(1)
+    seen = vis.any(0)
+    n_seen, left, chosen, curve = int(seen.sum()), seen.clone(), [], []
+    while left.any():
+        j = int((vis & left).sum(1).argmax())
+        chosen.append(j)
+        left &= ~vis[j]
+        curve.append(round(1 - int(left.sum()) / n_seen, 5))
+    sky = sky[seen]
+    m = sky.shape[0]
+    print(f"      {m} of {args.sky_points} sky points seen ({100 * m / args.sky_points:.1f} %), "
+          f"covered by {len(chosen)} of {len(cameras)} views")
+
+    # Reference view = the chosen view where the point is most central.
+    best = torch.full((m,), float("inf"), dtype=torch.float64, device=device)
+    ref_cam = torch.full((m,), -1, dtype=torch.long, device=device)
+    ref_uv = torch.zeros(m, 2, dtype=torch.float64, device=device)
+    for j in chosen:
+        uv, z = project(cameras[j], sky)
+        inside = (z > 0) & (uv.abs() <= 1).all(1)
+        c = torch.where(inside, uv.abs().amax(1), torch.full_like(z, float("inf")))
+        better = c < best
+        best[better], ref_cam[better], ref_uv[better] = c[better], j, uv[better]
+
+    # rgb + features at the reference pixels, as for the points.
+    feat = torch.zeros(m, pca.layout()[1], device=device)
+    rgb = torch.zeros(m, 3, device=device)
+    for j in tqdm(chosen, desc="sky views"):
+        sel = torch.nonzero(ref_cam == j).squeeze(1)
+        if len(sel) == 0:
+            continue
+        cam, uv = cameras[j], ref_uv[sel].float()
+        with torch.no_grad():
+            feat[sel] = pca.project(extractor.sample(j, cam_to_pil(cam), uv))
+            img = cam.original_image.to(device).float()[None]
+            rgb[sel] = F.grid_sample(img, uv.view(1, -1, 1, 2), align_corners=False)[0, :, :, 0].T
+
+    with torch.no_grad():
+        opacity = gaussians._opacity[torch.from_numpy(valid).to(gaussians._opacity.device)].median()
+        gaussians.densification_postfix(
+            sky.float(),
+            RGB2SH(rgb.clamp(0, 1)).unsqueeze(1),
+            torch.zeros(m, *gaussians._features_rest.shape[1:], device=device),
+            torch.full((m, 1), float(opacity), device=device),
+            torch.full((m, 3), math.log(g / 2), device=device),
+            torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).expand(m, 4).contiguous(),
+            torch.zeros(m, device=device))
+    new = {"feat": feat.cpu().numpy().astype(np.float16), "xyz": sky.float().cpu().numpy(),
+           "ref_cam": ref_cam.cpu().numpy().astype(np.int16),
+           "ref_uv": ref_uv.cpu().numpy().astype(np.float32), "valid": np.ones(m, dtype=bool)}
+    assert sorted(new) == sorted(record), sorted(record)
+    for k in record:
+        record[k] = np.concatenate([record[k], new[k].astype(record[k].dtype)])
+    record["is_sky"] = np.concatenate([np.zeros(n_old, dtype=bool), np.ones(m, dtype=bool)])
+    return {
+        "rows": [n_old, n_old + m], "num_points": m, "lattice_points": args.sky_points,
+        "sigma_k": args.sky_sigma_k, "sigma": sigma, "centre": centre.cpu().numpy().tolist(),
+        "radius": radius, "valid_points_outside": outside,
+        "points_per_voxel_target": args.sky_points_per_voxel, "points_per_voxel": ppv,
+        "voxel_size": g, "voxel_size_nominal": g_nominal, "voxel_origin": origin.cpu().numpy().tolist(),
+        "views": [int(j) for j in chosen], "cover_curve": curve,
+        "ply_scale": g / 2, "ply_opacity_logit": float(opacity),
+        "rgb_mean": rgb.mean(0).cpu().numpy().tolist(), "align_check_px": align_px,
+    }
+
+
 def sha1(path):
     h = hashlib.sha1()
     with open(path, "rb") as f:
@@ -270,6 +424,11 @@ def main(argv=None):
             gaussians._scaling.data = gaussians.scaling_inverse_activation(
                 gaussians.scaling_activation(gaussians._scaling.data) * args.final_scale_modifier)
 
+    sky_meta = None
+    if args.sky:
+        print("[4b/5] Sky points")
+        sky_meta = add_sky_points(gaussians, record, cameras, extractor, pca, args, device)
+
     n_final = int(gaussians._xyz.shape[0])
     assert record["feat"].shape[0] == n_final, (record["feat"].shape, n_final)
     assert np.allclose(record["xyz"], gaussians._xyz.detach().cpu().numpy(), atol=1e-5), \
@@ -305,6 +464,8 @@ def main(argv=None):
         "seconds": round(time.time() - t0, 1),
         "args": vars(args),
     }
+    if sky_meta is not None:
+        meta["sky"] = sky_meta
     feat_path = os.path.join(out_dir, "features.npz")
     np.savez(feat_path, **record)
     with open(os.path.join(out_dir, "features_meta.json"), "w") as f:
