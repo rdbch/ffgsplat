@@ -218,6 +218,9 @@ class Scene:
     eval_loader: DataLoader
     means: torch.Tensor
     feat: torch.Tensor
+    # Fixed PE divider r (`input.pos_radius="sigma"`), in the scene frame; None =
+    # percentile of the points (as before).
+    fixed_pos_radius: Optional[float] = None
 
 
 @dataclass
@@ -766,6 +769,11 @@ class Trainer:
         # Input points: the reference checkpoint's Gaussians (mcmc) or the EDGS
         # initialization (edgs, already in the parser's normalized frame).
         image_feat = None
+        fixed_pos_radius = None
+        if self.cfg.input.pos_radius not in ("percentile", "sigma"):
+            raise ValueError(f"input.pos_radius must be percentile or sigma, got {self.cfg.input.pos_radius!r}")
+        if self.cfg.input.sky and self.cfg.input.source != "edgs":
+            raise ValueError("input.sky needs input.source=edgs")
         if self.cfg.input.source == "edgs":
             edgs_dir = self.cfg.input.edgs_dir.format(scene=name)
             input_cfg = self.cfg.input
@@ -775,6 +783,12 @@ class Trainer:
             means, image_feat = edgs["means"], edgs["features"]
             rgb = torch.from_numpy(edgs["rgb"])
             info = edgs["info"]
+            if input_cfg.sky:
+                # The sky flag is the last feature channel (into the feature MLP,
+                # unstandardized); it also marks the sky rows downstream.
+                flag = edgs["is_sky"].astype(np.float32)[:, None]
+                image_feat = flag if image_feat is None else np.concatenate([image_feat, flag], 1)
+            print(f"[{name}] sky points: {info['num_sky']}")
             print(
                 f"[{name}] EDGS points from {edgs_dir}: {info['num_used']} used of "
                 f"{info['num_valid']} valid / {info['num_total']}; reprojection into the "
@@ -821,10 +835,21 @@ class Trainer:
             raise ValueError(f"[{name}] {channels} feature channels, other scenes have {self.feature_channels}")
         self.feature_channels = channels
 
+        if self.cfg.input.pos_radius == "sigma":
+            # |mu| + k sigma of the scene points (sky rows, flagged in the last
+            # channel, excluded), in the scene frame.
+            pts = means[feat[:, -1] < 0.5] if self.cfg.input.sky else means
+            mu = pts.double().mean(0)
+            sigma = ((pts.double() - mu) ** 2).sum(1).mean().div(3).sqrt()
+            fixed_pos_radius = float(mu.norm() + self.cfg.input.pos_sigma_k * sigma)
+            print(f"[{name}] PE radius |mu| + {self.cfg.input.pos_sigma_k:g} sigma = {mu.norm():.4f} + "
+                  f"{self.cfg.input.pos_sigma_k:g} x {sigma:.4f} = {fixed_pos_radius:.4f}")
+
         if self.device.type == "cuda":
             means = means.pin_memory()
             feat = feat.pin_memory()
-        return Scene(name, parser, train_dataset, eval_dataset, eval_loader, means, feat)
+        return Scene(name, parser, train_dataset, eval_dataset, eval_loader, means, feat,
+                     fixed_pos_radius=fixed_pos_radius)
 
     def train(self):
         train_iter = self._train_batches()
@@ -899,11 +924,12 @@ class Trainer:
         cloud, frustum-culled to `batch`'s views with `trainer.frustum_cull`.
         `core.trainer_dl3dv` draws a random subset instead."""
         if self.cfg.trainer.frustum_cull == "none":
-            return scene.means, scene.feat, None, 1.0
+            return scene.means, scene.feat, scene.fixed_pos_radius, 1.0
         means = scene.means.to(self.device, non_blocking=True)
         keep = self._frustum_mask(means, batch)
         rows = keep.nonzero().squeeze(1).cpu()
-        return scene.means[rows], scene.feat[rows], self._pe_radius(means), len(rows) / len(keep)
+        radius = scene.fixed_pos_radius if scene.fixed_pos_radius is not None else self._pe_radius(means)
+        return scene.means[rows], scene.feat[rows], radius, len(rows) / len(keep)
 
     def _pe_radius(self, means):
         """The PE divider `r` of `means` (in the scene frame; augmentation
@@ -982,6 +1008,8 @@ class Trainer:
             "cull_keep_frac": mean("cull_keep_frac"),
             **({k: mean(k) for k in ("offset_abs_mean", "offset_sat_frac")} if "offset_abs_mean" in parts[0] else {}),
             **({k: mean(k) for k in ("pos_radius", "pe_proj_norm") if k in parts[0]}),
+            # Sky points (`input.sky`): count per forward, their mean opacity / scale.
+            **({k: mean(k) for k in ("num_sky", "sky_opacity_mean", "sky_scale_mean") if all(k in p for p in parts)}),
             "mem_gib": torch.cuda.max_memory_allocated(self.device) / 2**30,
             # Peak held by the caching allocator (allocated + cached blocks); the
             # number to compare against the card's capacity.
@@ -1129,10 +1157,21 @@ class Trainer:
             "alpha_mean": alpha_sum,
             "num_points": coord.shape[0],
             "cull_keep_frac": batch.get("cull_keep_frac", 1.0),
+            **(self._sky_stats(feat, opacities, scales) if self.cfg.input.sky else {}),
             **self._offset_stats(splats),
             **self._pos_stats(),
             "image": image,
         }
+
+    def _sky_stats(self, feat, opacities, scales):
+        """Sky points in this forward (flag = last input channel) and their mean
+        opacity / scale."""
+        sky = feat[:, -1] > 0.5
+        stats = {"num_sky": int(sky.sum())}
+        if stats["num_sky"]:
+            stats["sky_opacity_mean"] = opacities.detach()[sky].mean().item()
+            stats["sky_scale_mean"] = scales.detach()[sky].mean().item()
+        return stats
 
     def _offset_stats(self, splats):
         """Mean |offset| and the fraction of offset components near the
@@ -1211,7 +1250,7 @@ class Trainer:
             offset=torch.tensor([coord.shape[0]], device=self.device),
         )
         with bn_batch_stats(self.model, self.cfg.trainer.eval_bn_batch_stats):
-            splats = self.model(point)
+            splats = self.model(point, pos_radius=scene.fixed_pos_radius)
         splats = {
             "means": coord + splats["offsets"] if "offsets" in splats else coord,
             "quats": splats["quats"],

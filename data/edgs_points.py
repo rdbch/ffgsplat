@@ -43,6 +43,12 @@ class InputConfig:
     scene_max_points: Dict[str, int] = field(default_factory=dict)
     # Drop EDGS points that failed the reprojection test (zero opacity in the PLY).
     drop_invalid: bool = True
+    # Sky points (rows with `is_sky` in features.npz, from `edgs_extract_ref.py
+    # --sky`). False: dropped, so scenes with and without them load the same points.
+    # True: all of them are kept on top of the scene points (`max_points` and the
+    # feature standardization use the scene points only, so the scene rows are the
+    # same as with False), and the model gets them as sky (see `core.trainer`).
+    sky: bool = False
     # Seed of the `max_points` subset (independent of the training RNG).
     seed: int = 0
     # Feature blocks go through an MLP before LitePT: standardize -> Linear(D, dim)
@@ -70,6 +76,14 @@ class InputConfig:
     # distances (after augmentation) are projected onto that sphere before
     # encoding (p and sin / cos bounded by r_c / r). 0 = off.
     pos_clamp_percentile: float = 0.0
+    # The PE divider r: "percentile" (`pos_percentile` of the distances, above) or
+    # "sigma": |mu| + pos_sigma_k * sigma of one Gaussian fitted to the scene points
+    # (mean mu, sigma = sqrt(tr(Sigma) / 3), sky points excluded), computed once per
+    # scene in the training frame: the farthest distance from the origin of the
+    # sphere at pos_sigma_k sigma around mu. With pos_sigma_k = the sky's sigma_k,
+    # every point incl. the sky has |p| <= 1; the same r with or without `sky`.
+    pos_radius: str = "percentile"
+    pos_sigma_k: float = 4.0
     # Alignment check: fail if the median distance (pixels) between the projected
     # EDGS points and the pixels they were triangulated from exceeds this.
     max_align_error_px: float = 3.0
@@ -116,7 +130,8 @@ def load_edgs_points(cfg: InputConfig, scene_dir: str, parser, train_indices) ->
     """Load one scene's EDGS points in the parser's (normalized) frame.
 
     Returns {"means": [N, 3] f32, "rgb": [N, 3] f32 in [0, 1], "features": [N, D] f32
-    standardized or None, "feature_dims": {block: d}, "info": {...}}.
+    standardized or None, "feature_dims": {block: d}, "is_sky": [N] bool (sky rows
+    last; all False unless `cfg.sky`), "info": {...}}.
 
     Checks (raise on failure):
       - the EDGS reference cameras are exactly the parser's training views, so held-out
@@ -145,9 +160,18 @@ def load_edgs_points(cfg: InputConfig, scene_dir: str, parser, train_indices) ->
 
     # --- point subset ----------------------------------------------------------------
     rows = np.flatnonzero(valid) if cfg.drop_invalid else np.arange(len(valid))
+    is_sky_all = npz["is_sky"] if "is_sky" in npz.files else np.zeros(len(valid), dtype=bool)
+    if cfg.sky and not is_sky_all.any():
+        raise ValueError(f"{scene_dir}: input.sky=true but features.npz has no sky points")
+    sky_rows = rows[is_sky_all[rows]]
+    rows = rows[~is_sky_all[rows]]
     if cfg.max_points is not None and len(rows) > cfg.max_points:
         rng = np.random.default_rng(cfg.seed)
         rows = np.sort(rng.choice(rows, size=cfg.max_points, replace=False))
+    num_scene = len(rows)
+    if cfg.sky:
+        rows = np.concatenate([rows, sky_rows])          # sky rows last
+    is_sky = is_sky_all[rows]
 
     vertex = PlyData.read(meta["ply_path"])["vertex"].data
     if len(vertex) != len(valid):
@@ -189,15 +213,18 @@ def load_edgs_points(cfg: InputConfig, scene_dir: str, parser, train_indices) ->
         features = np.concatenate([feat[:, spans[b][0]:spans[b][1]] for b in blocks], 1).astype(np.float32)
         feature_dims = {b: spans[b][1] - spans[b][0] for b in blocks}
         # Per-dimension standardization (the PCA components have very different
-        # variances), with this scene's own statistics.
-        features = (features - features.mean(0)) / (features.std(0) + 1e-6)
+        # variances), with this scene's own statistics (scene points only).
+        ref = features[:num_scene]
+        features = (features - ref.mean(0)) / (ref.std(0) + 1e-6)
 
     info = {
         "num_total": int(len(valid)),
         "num_valid": int(valid.sum()),
         "num_used": int(len(rows)),
+        "num_sky": int(is_sky.sum()),
         "align_median_px": align_px,
         "align_p90_px": float(np.percentile(errors, 90)),
         "pca_basis_sha1": meta.get("pca_basis_sha1"),
     }
-    return {"means": means, "rgb": rgb, "features": features, "feature_dims": feature_dims, "info": info}
+    return {"means": means, "rgb": rgb, "features": features, "feature_dims": feature_dims,
+            "is_sky": is_sky, "info": info}
