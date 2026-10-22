@@ -387,6 +387,54 @@ Results: pending.
 
 ---
 
+## 2026-10-22 · 020 — sky sphere of fake points (bonsai)
+
+**Change.** A sphere of extra "sky" points around the scene, so sky / far
+background / everything without EDGS points can get Gaussians too; the network
+decides (through opacity) where it needs them. Design: `docs/chunking_implementation_plan.md`
+("Sky / background").
+
+- **Extraction** (`edgs_extract_ref.py --sky`, same file as the points): sphere
+  centred at the mean μ of the valid EDGS points, radius **4σ** (σ = √(tr Σ / 3)
+  of one Gaussian fitted to them), 200k Fibonacci points; frustum cull with the
+  training views (sky points no view sees are dropped); greedy set cover → the
+  minimum set of views; each sky point's reference view = the chosen view where
+  it is most central; rgb + the 104-d RoMa / DINO features sampled there exactly
+  as for the points (occlusion ignored). Appended to the same PLY / features.npz
+  with `is_sky`. All 7 Mip-NeRF scenes in `experiments/edgs_feat_sky/` (job 836,
+  3–5 min per scene; bonsai: 118k of 200k kept, 23 of 255 views, 0.22 % of the
+  valid points outside 4σ; stump 4.4 %, bicycle 3.3 %).
+- **Training** (`input.sky=true`): the sky points go in with all the scene
+  points, **same voxel grid (0.005)**, same forward and head; an `is_sky` flag
+  as the last feature channel (into the feature MLP).
+- **PE radius** (`input.pos_radius=sigma`, both runs): r = |μ| + 4σ of the
+  scene points in the training frame (sky excluded) = 0.544 + 4 × 1.218 =
+  **5.418** on bonsai: the 4σ sphere's farthest point from the origin, so every
+  point incl. the sky has |p| ≤ 1 (r95 would put the sky at |p| ≈ 1.4 and wrap).
+
+Setup: `scripts/020_train_bonsai_sky.sh` (+ `jobs/ffgsplat_020.slurm`),
+019c's settings on bonsai: skip concat 64 + hidden 128, colour residual,
+per-pixel background, kNN views (anchor + 7 nearest; bonsai as a one-scene
+multi-scene setup), frustum cull 5 %, mild augmentation, Muon 4e-4, SH 3 every
+2000, max scale 0.4, offsets 1.5 vox, Fourier PE F4 without raw p, drop-path 0,
+LayerNorm. Points from `edgs_feat_sky/bonsai`: a fixed 1M subset of the scene
+points (seed 0) in both runs, + all 118k sky points with sky. 20k steps, 8
+views / step, eval every 1000, 3g.71gb slices.
+
+| run | sky | job | wandb |
+|---|---|---|---|
+| 020-sky | ✓ | 855 | `su3k9soz` |
+| 020-nosky | – (sky rows dropped, same scene points, same r) | 856 | `66dy9qni` |
+
+Smoke tests (100 steps): per step ~575k points after culling of which ~24k sky;
+sky opacity 0.10 → 0.17 and scale 0.010 → 0.019 by step 100 (the sky is being
+used); ~0.9 s/step (→ ~5 h for 20k), 17 GB allocated / 33 GB reserved (sky) vs
+22 GB (no sky).
+
+**Results: running** (launched 2026-10-22).
+
+---
+
 ## Open questions / next
 
 - Longer-term goal: chunked reconstruction with chunk-relative PE — see
