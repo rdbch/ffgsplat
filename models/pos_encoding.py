@@ -1,5 +1,5 @@
 import math
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -17,7 +17,7 @@ def _percentile(values: torch.Tensor, percentile: float) -> torch.Tensor:
 @torch.no_grad()
 def fourier_pos(
     coord: torch.Tensor, num_freqs: int, percentile: float, include_raw: bool,
-    clamp_percentile: float = 0.0,
+    clamp_percentile: float = 0.0, radius: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fourier features of the input points' positions.
 
@@ -37,6 +37,8 @@ def fourier_pos(
         radius r_c (direction kept, distance beyond r_c dropped), before both p
         and its sin / cos: everything is bounded by r_c / r. Distances only, so
         still consistent under augmentation. 0 = no clamp.
+      - `radius` (optional) replaces the percentile `r`, e.g. the radius of the
+        whole cloud when `coord` is only its frustum-culled part.
 
     Returns (enc [N, pos_channels(num_freqs, include_raw)], r scalar tensor).
     With p in [-1, 1] the encoding is unique: frequencies `2^k * pi`,
@@ -45,7 +47,7 @@ def fourier_pos(
     """
     coord = coord.float()
     dist = coord.norm(dim=1)
-    r = _percentile(dist, percentile).clamp_min(1e-6)
+    r = (_percentile(dist, percentile) if radius is None else torch.as_tensor(radius, device=coord.device)).clamp_min(1e-6)
     p = coord / r                                                    # [N, 3]
     if clamp_percentile > 0:
         r_c = _percentile(dist, clamp_percentile)

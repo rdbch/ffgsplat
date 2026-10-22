@@ -107,11 +107,11 @@ def jittered_grid_coord(coord: torch.Tensor, grid_size: float) -> torch.Tensor:
 
 def augment(
     cfg: AugmentConfig, means: torch.Tensor, camtoworlds: torch.Tensor, grid_size: float
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Return (means, camtoworlds, grid_coord-or-None); identity if disabled."""
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], float]:
+    """Return (means, camtoworlds, grid_coord-or-None, scale s); identity if disabled."""
     if not cfg.enabled:
-        return means, camtoworlds, None
+        return means, camtoworlds, None, 1.0
     R, s = sample_similarity(cfg, means.device)
     means, camtoworlds = apply_similarity(R, s, means, camtoworlds)
     grid_coord = jittered_grid_coord(means, grid_size) if cfg.voxel_jitter else None
-    return means, camtoworlds, grid_coord
+    return means, camtoworlds, grid_coord, s

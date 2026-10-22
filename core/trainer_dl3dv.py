@@ -52,6 +52,8 @@ from core.trainer import (
     _collate_camera_batch,
     _MultiSceneDataset,
     _RandomSceneBatchSampler,
+    frustum_mask,
+    percentile_radius,
 )
 from data.augment import max_expansion
 from data.datasets.colmap import Dataset, DatasetConfig, Parser
@@ -81,10 +83,20 @@ class DL3DVConfig:
     # With either set, eval_seen = exactly these training scenes.
     train_environment: Optional[str] = None
     train_limit: Optional[int] = None
+    # Which of the split's lists to train on: "train" (120 scenes) or
+    # "eval_seen" (its 10 scenes, 5 bounded / 5 unbounded; eval_seen = them).
+    # `train_environment` / `train_limit` filter that list.
+    train_on: str = "train"
     # Debugging: train on the first `lazy_train_scenes` training scenes only and
     # load each scene's points on first use instead of all at startup.
     lazy: bool = False
     lazy_train_scenes: int = 4
+    # Draw / frustum-cull / gather each micro-batch's input points in the train
+    # loader's workers (CPU, in parallel, overlapped with the GPU step) instead
+    # of the main process: the main process only copies the (culled) points to
+    # the GPU. The workers are forked after the scenes are loaded and share
+    # their points. Ignored with `lazy` (each worker would load its own copy).
+    points_in_workers: bool = False
 
 
 @dataclass
@@ -104,6 +116,64 @@ class DL3DVScene(Scene):
     scale: float = 1.0
     # Fixed eval subset (fp32 means / feat), set on first use (`_eval_view`).
     eval_view: Optional["DL3DVScene"] = None
+    # PE radius of all of `means` (frustum_cull="full"), set on first use.
+    pos_radius: Optional[float] = None
+
+
+def _eval_rows(scene, seed):
+    """The fixed subset of `scene`'s points used for eval (same every eval / run)."""
+    rng = np.random.default_rng(seed)
+    rows = np.sort(rng.choice(scene.means.shape[0], size=scene.num_points, replace=False))
+    return torch.from_numpy(rows)
+
+
+def _sample_points(scene, batch, args):
+    """A random subset of `scene.num_points` of the scene's points (the fixed
+    eval subset without `args["resample"]`), frustum-culled to `batch`'s views
+    with `args["cull"]`: "subset" culls the subset, "full" culls all points and
+    draws the subset from the visible ones (resampled only). On the CPU; only
+    the kept rows are gathered. Returns (means fp32, feat fp16, PE radius of
+    the cloud before culling or None, kept fraction)."""
+    cull, pe = args["cull"], args["pe_percentile"]
+    pos_radius, keep_frac = None, 1.0
+    if cull != "none":
+        height, width = batch["image"].shape[1:3]
+        mask = lambda means: frustum_mask(means, batch["camtoworld"], batch["K"], height, width,
+                                          args["margin"], args["near_plane"])
+    if cull == "full" and args["resample"]:
+        visible = mask(scene.means).nonzero().squeeze(1)
+        # A uniform subset of the whole cloud has (in expectation) the whole
+        # cloud's percentile radius.
+        if pe is not None and scene.pos_radius is None:
+            scene.pos_radius = percentile_radius(scene.means, pe)
+        pos_radius, keep_frac = scene.pos_radius, len(visible) / len(scene.means)
+        rows = visible[torch.randperm(len(visible))[: scene.num_points]]
+    else:
+        rows = torch.randperm(scene.means.shape[0])[: scene.num_points] if args["resample"] else _eval_rows(scene, args["seed"])
+        if cull != "none":
+            sub_means = scene.means[rows]
+            keep = mask(sub_means)
+            pos_radius = percentile_radius(sub_means, pe) if pe is not None else None
+            keep_frac = keep.float().mean().item()
+            rows = rows[keep]
+    return scene.means[rows], scene.feat[rows], pos_radius, keep_frac
+
+
+class _PointsCollate:
+    """Train loader collate (`dl3dv.points_in_workers`): the camera batch plus
+    its input points (`_sample_points`), so the draw / cull / gather run in
+    the loader workers. The workers are forked after the scenes are loaded,
+    so `scenes`' points are shared, not copied."""
+
+    def __init__(self, scenes, args):
+        self.scenes = scenes
+        self.args = args
+
+    def __call__(self, items):
+        batch = _collate_camera_batch(items)
+        scene = self.scenes[int(batch["scene"][0])]
+        batch["means"], batch["feat"], batch["pos_radius"], batch["cull_keep_frac"] = _sample_points(scene, batch, self.args)
+        return batch
 
 
 class TrainerDL3DV(Trainer):
@@ -121,7 +191,9 @@ class TrainerDL3DV(Trainer):
 
     def build_dataloaders(self):
         data_cfg, dl3dv = self.cfg.data, self.cfg.dl3dv
-        train_names = self.split["train"]
+        if dl3dv.train_on not in ("train", "eval_seen"):
+            raise ValueError(f"dl3dv.train_on must be train or eval_seen, got {dl3dv.train_on!r}")
+        train_names = self.split[dl3dv.train_on]
         seen_names = self.split["eval_seen"]
         unseen_names = self.split["eval_unseen"]
         if dl3dv.train_environment is not None or dl3dv.train_limit is not None:
@@ -163,11 +235,16 @@ class TrainerDL3DV(Trainer):
             print(f"DL3DV (lazy): {len(self.scenes)} training scenes (the first {dl3dv.lazy_train_scenes}), "
                   f"{len(self.eval_seen)} eval_seen, {len(self.eval_unseen)} eval_unseen; points loaded on first use")
 
+        in_workers = dl3dv.points_in_workers and not dl3dv.lazy and data_cfg.train_num_workers > 0
+        if in_workers:
+            print(f"DL3DV: input points drawn / culled ({self.cfg.trainer.frustum_cull}) in the "
+                  f"{data_cfg.train_num_workers} train loader workers")
         self.train_loader = DataLoader(
             _MultiSceneDataset([scene.train_dataset for scene in self.scenes]),
-            collate_fn=_collate_camera_batch,
+            collate_fn=_PointsCollate(self.scenes, self._points_args()) if in_workers else _collate_camera_batch,
             batch_sampler=_RandomSceneBatchSampler(
-                [len(scene.train_dataset) for scene in self.scenes], data_cfg.train_batch_size
+                [len(scene.train_dataset) for scene in self.scenes], data_cfg.train_batch_size,
+                positions=self._view_positions(),
             ),
             num_workers=data_cfg.train_num_workers,
             pin_memory=data_cfg.train_pin_memory,
@@ -249,9 +326,7 @@ class TrainerDL3DV(Trainer):
 
     def _eval_rows(self, scene):
         """The fixed subset of `scene`'s points used for eval (same every eval / run)."""
-        rng = np.random.default_rng(self.cfg.input.seed)
-        rows = np.sort(rng.choice(scene.means.shape[0], size=scene.num_points, replace=False))
-        return torch.from_numpy(rows)
+        return _eval_rows(scene, self.cfg.input.seed)
 
     def _eval_view(self, scene):
         """`scene.eval_view`: a `DL3DVScene` sharing `scene`'s parser and eval
@@ -272,17 +347,23 @@ class TrainerDL3DV(Trainer):
                 scene.means = scene.feat = None
         return scene.eval_view
 
-    def _train_points(self, scene):
+    def _train_points(self, scene, batch):
+        """Input points of one training micro-batch, in the main process (see
+        `_sample_points`; `_PointsCollate` does the same in the loader workers).
+        Upcasts the features on the GPU."""
         if scene.means is None:
             self._load_points(scene)
-        if self.cfg.dl3dv.resample_points:
-            rows = torch.randperm(scene.means.shape[0])[: scene.num_points]
-        else:
-            rows = self._eval_rows(scene)
-        # Gather on the CPU, upcast the features on the GPU.
-        means = scene.means[rows].to(self.device, non_blocking=True)
-        feat = scene.feat[rows].to(self.device, non_blocking=True).float()
-        return means, feat
+        means, feat, pos_radius, keep_frac = _sample_points(scene, batch, self._points_args())
+        return (means.to(self.device, non_blocking=True), feat.to(self.device, non_blocking=True).float(),
+                pos_radius, keep_frac)
+
+    def _points_args(self):
+        trainer = self.cfg.trainer
+        return dict(
+            cull=trainer.frustum_cull, margin=trainer.cull_margin, near_plane=trainer.near_plane,
+            resample=self.cfg.dl3dv.resample_points, seed=self.cfg.input.seed,
+            pe_percentile=None if self.cfg.input.pos_encoding == "none" else self.cfg.input.pos_percentile,
+        )
 
     @torch.no_grad()
     def eval(self):

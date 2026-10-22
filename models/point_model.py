@@ -31,6 +31,14 @@ class LitePtGSModel(nn.Module):
     feature MLP (`pos_inject="input"`, widens LitePT's `in_channels`), added
     to the stem's output through a zero-initialized linear (`"embed"`), or
     both.
+
+    `skip` adds a path from the backbone's input `x0` ([rgb | projected
+    features | PE], before LitePT's stem) straight to the head: `"add"` adds
+    a zero-initialized `Linear(x0)` to the backbone output, `"concat"`
+    concatenates `GELU(Linear(x0))` to it. `hidden_dim > 0` puts a hidden
+    layer (+ GELU) before the output linears. With `color_residual`, `sh0` is
+    predicted as a residual on the input rgb (every Gaussian starts at its
+    input colour instead of grey).
     """
 
     def __init__(
@@ -52,6 +60,10 @@ class LitePtGSModel(nn.Module):
         pos_inject: str = "input",
         pos_norm: str = "none",
         pos_clamp_percentile: float = 0.0,
+        skip: str = "none",
+        skip_dim: int = 64,
+        hidden_dim: int = 0,
+        color_residual: bool = False,
     ):
         super().__init__()
         # Input `feat` = [direct_channels (rgb) | feature_channels (image features)].
@@ -99,6 +111,30 @@ class LitePtGSModel(nn.Module):
 
         # LitePT's decoder ends at `dec_channels[0]` (one row per input point).
         out_channels = backbone_cfg["dec_channels"][0]
+
+        # Input -> head skip (see the class docstring). With `"none"`,
+        # `hidden_dim=0` and no `color_residual` nothing below exists, so
+        # models and checkpoints are unchanged.
+        if skip not in ("none", "add", "concat"):
+            raise ValueError(f"skip must be none, add or concat, got {skip!r}")
+        if color_residual and direct_channels != 3:
+            raise ValueError("color_residual needs the rgb input channels (input.features with rgb)")
+        self.skip = skip
+        self.color_residual = color_residual
+        self.skip_proj = None
+        if skip == "add":
+            # Zero init: at step 0 the head sees exactly the backbone output.
+            self.skip_proj = nn.Linear(backbone_cfg["in_channels"], out_channels)
+            nn.init.zeros_(self.skip_proj.weight)
+            nn.init.zeros_(self.skip_proj.bias)
+        elif skip == "concat":
+            self.skip_proj = nn.Sequential(nn.Linear(backbone_cfg["in_channels"], skip_dim), nn.GELU())
+            out_channels += skip_dim
+        self.head_mlp = None
+        if hidden_dim > 0:
+            self.head_mlp = nn.Sequential(nn.Linear(out_channels, hidden_dim), nn.GELU())
+            out_channels = hidden_dim
+
         self.split = [3, 4, 1, 3, self.num_sh_rest * 3]
         self.head = nn.Linear(out_channels, sum(self.split))
 
@@ -130,13 +166,15 @@ class LitePtGSModel(nn.Module):
             nn.init.zeros_(self.offset_head.weight)
             nn.init.zeros_(self.offset_head.bias)
 
-    def forward(self, point: Point) -> Dict[str, torch.Tensor]:
+    def forward(self, point: Point, pos_radius=None) -> Dict[str, torch.Tensor]:
+        """`pos_radius` (optional): the PE divider `r` to use instead of the
+        percentile radius of `point.coord` (see `fourier_pos`)."""
         pe = None
         if self.pos_encoding != "none":
             # From the (augmented) coordinates the backbone sees.
             pe, self.pos_radius = fourier_pos(
                 point.coord, self.pos_freqs, self.pos_percentile, self.pos_include_raw,
-                self.pos_clamp_percentile)
+                self.pos_clamp_percentile, radius=pos_radius)
             if self.pe_norm is not None:
                 pe = self.pe_norm(pe)
         if self.feature_mlp is not None:
@@ -146,12 +184,24 @@ class LitePtGSModel(nn.Module):
         if self.pos_to_input:
             # [rgb | projected features | PE]
             point.feat = torch.cat([point.feat, pe.to(point.feat.dtype)], dim=1)
+        # The backbone's input, kept for the skip / colour residual (LitePT
+        # returns one row per input point, in the input order).
+        x0 = point.feat
         if self.pe_proj is None:
             out = self.backbone(point).feat
         else:
             out = self._backbone_with_embed_pe(point, pe).feat
+        if self.skip == "add":
+            out = out + self.skip_proj(x0)
+        elif self.skip == "concat":
+            out = torch.cat([out, self.skip_proj(x0)], dim=1)
+        if self.head_mlp is not None:
+            out = self.head_mlp(out)
         feat = self.head(out)
         scales, quats, opacities, sh0, shN = feat.split(self.split, dim=-1)
+        if self.color_residual:
+            # Degree-0 SH of the input rgb: `rgb = 0.5 + C0 * sh0`.
+            sh0 = sh0 + (x0[:, :3] - 0.5) / 0.28209479177387814
         # Bounded log-scale: `exp(scales) <= max_scale`. Unbounded, a few steps
         # of network updates can blow Gaussians up to cover whole images, and
         # rasterization's tile-intersection buffers grow with that (OOM).

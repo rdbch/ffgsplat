@@ -81,6 +81,41 @@ def _collate_camera_batch(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def percentile_radius(means: torch.Tensor, percentile: float) -> float:
+    """The `percentile`-th percentile of `means`' distances to the origin (the
+    positional encoding's divider `r`, see `models.pos_encoding.fourier_pos`)."""
+    k = max(1, math.ceil(percentile / 100.0 * len(means)))
+    return means.float().norm(dim=1).kthvalue(k).values.item()
+
+
+@torch.no_grad()
+def frustum_mask(means, camtoworlds, Ks, height, width, margin, near_plane):
+    """[N] bool on `means`' device: inside at least one of the views
+    (`camtoworlds` [B, 4, 4] OpenCV, `Ks` [B, 3, 3]; image widened by the same
+    `margin` x max(width, height) pixels on every side), in front of
+    `near_plane`. All of them if none is (degenerate views: better the whole
+    cloud than none)."""
+    camtoworlds = camtoworlds.to(means.device)
+    Ks = Ks.to(means.device)
+    pad = margin * max(width, height)                                  # pixels, isotropic
+    keep = torch.zeros(len(means), dtype=torch.bool, device=means.device)
+    for c2w, K in zip(camtoworlds, Ks):
+        cam = (means - c2w[:3, 3]) @ c2w[:3, :3]                  # world -> OpenCV camera
+        z = cam[:, 2]
+        front = z > near_plane
+        z = z.clamp_min(1e-6)
+        u = K[0, 0] * cam[:, 0] / z + K[0, 2]
+        v = K[1, 1] * cam[:, 1] / z + K[1, 2]
+        keep |= (
+            front
+            & (u >= -pad) & (u <= width + pad)
+            & (v >= -pad) & (v <= height + pad)
+        )
+    if not keep.any():
+        keep[:] = True
+    return keep
+
+
 @contextlib.contextmanager
 def bn_batch_stats(model: nn.Module, enabled: bool = True):
     """Within the block, BatchNorm layers normalize with the current batch's
@@ -122,17 +157,40 @@ class _RandomSceneBatchSampler(torch.utils.data.Sampler):
     """Endless batches of `batch_size` views of one scene, picked uniformly at
     random each batch (so each rank renders a random scene each step). Views
     come from a per-scene shuffled order, reshuffled when used up. Draws from
-    torch's default RNG, which is seeded per rank."""
+    torch's default RNG, which is seeded per rank.
 
-    def __init__(self, sizes, batch_size):
+    With `positions` (per scene, [n, 3] camera centers of its training views,
+    `data.train_view_sampling="knn"`): the next view of the shuffled order is
+    the anchor, and the batch is it + its `batch_size - 1` nearest views by
+    camera-center distance (fewer if the scene has fewer views), so the
+    views overlap (and frustum culling keeps less)."""
+
+    def __init__(self, sizes, batch_size, positions=None):
         self.sizes = list(sizes)
         self.batch_size = batch_size
+        self.neighbors = None
+        if positions is not None:
+            self.neighbors = []
+            for p in positions:
+                p = torch.as_tensor(p, dtype=torch.float64)
+                dist = torch.cdist(p, p)
+                dist.fill_diagonal_(float("inf"))
+                k = min(batch_size - 1, len(p) - 1)
+                self.neighbors.append(dist.topk(k, largest=False).indices.tolist())
 
     def __iter__(self):
         orders = [torch.randperm(n).tolist() for n in self.sizes]
         pos = [0] * len(self.sizes)
         while True:
             scene = int(torch.randint(len(self.sizes), ()))
+            if self.neighbors is not None:
+                if pos[scene] == len(orders[scene]):
+                    orders[scene] = torch.randperm(self.sizes[scene]).tolist()
+                    pos[scene] = 0
+                anchor = orders[scene][pos[scene]]
+                pos[scene] += 1
+                yield [(scene, i) for i in [anchor] + self.neighbors[scene][anchor]]
+                continue
             batch = []
             while len(batch) < self.batch_size:
                 if pos[scene] == len(orders[scene]):
@@ -186,6 +244,11 @@ class DataConfig:
     train_patch_size: Optional[int] = None
     train_load_depths: bool = False
     train_batch_size: int = 4
+    # How a multi-scene training batch's views are picked (`_RandomSceneBatchSampler`):
+    # "random" = the next `train_batch_size` views of the scene's shuffled order;
+    # "knn" = the next view of that order + its `train_batch_size - 1` nearest
+    # training views by camera center.
+    train_view_sampling: str = "random"
     train_num_workers: int = 4
     train_shuffle: bool = True
     train_pin_memory: bool = False
@@ -311,6 +374,16 @@ class HeadConfig:
     # input point (world units, the `trainer.point_grid_size` frame); bounded
     # by `max_offset * tanh`. 0 disables the offset head (no extra weights).
     max_offset: float = 0.0
+    # Skip from the backbone's input ([rgb | projected features | PE], before
+    # LitePT's stem) to the head: "none", "add" (zero-initialized Linear(x0)
+    # added to the backbone output) or "concat" (GELU(Linear(x0 -> skip_dim))
+    # concatenated to it).
+    skip: str = "none"
+    skip_dim: int = 64
+    # Hidden layer (+ GELU) before the output linears; 0 = linear head.
+    hidden_dim: int = 0
+    # Predict `sh0` as a residual on the input rgb (needs "rgb" in input.features).
+    color_residual: bool = False
 
 
 @dataclass
@@ -391,10 +464,27 @@ class TrainerConfig:
     # large ones to nothing. 0 disables.
     scale_tail_reg: float = 0.0
     scale_tail_threshold: float = 0.1
-    # Composite each training render over a random solid color (per view)
-    # instead of black, so Gaussians can't lean on a black background for
-    # dark/empty regions. Eval always renders over black.
+    # Composite each training render over a random background instead of
+    # black, so Gaussians can't lean on a black background for dark/empty
+    # regions. Eval always renders over black.
     random_bkgd: bool = True
+    # "color": one random solid color per view. "pixel": an independent random
+    # color per pixel (noise can't be matched, so every alpha < 1 costs).
+    random_bkgd_mode: str = "color"
+    # Frustum culling of the training input points: keep only the points inside
+    # at least one of the micro-batch's views (widened by `cull_margin`), in front
+    # of the camera. "none"; "subset": cull the usual input cloud (the random
+    # subset with DL3DV): fewer points, faster and less memory; "full": cull all
+    # of the scene's points, then draw the subset from the visible ones (same
+    # point budget, denser where it is rendered; = "subset" without a random
+    # subset). The PE radius is that of the cloud before culling. Eval always
+    # uses the whole cloud.
+    frustum_cull: str = "none"
+    # Margin around each view, the same number of pixels on every side:
+    # `cull_margin` x max(width, height) (48 px at 960x540 with 0.05), so that
+    # Gaussians just outside the image (and the backbone's context at its
+    # border) are kept.
+    cull_margin: float = 0.05
     # Normalize with the evaluated cloud's own statistics in BatchNorm layers
     # at eval (as in training, where each batch is one whole cloud) instead of
     # the running averages. Needed with augmentation + `model.norm="batch"`:
@@ -498,6 +588,10 @@ class Trainer:
             init_opacity=self.cfg.head.init_opacity,
             max_scale=self.cfg.head.max_scale,
             max_offset=self.cfg.head.max_offset,
+            skip=self.cfg.head.skip,
+            skip_dim=self.cfg.head.skip_dim,
+            hidden_dim=self.cfg.head.hidden_dim,
+            color_residual=self.cfg.head.color_residual,
             direct_channels=self.direct_channels,
             feature_channels=self.feature_channels,
             feature_mlp_dim=self.cfg.input.feature_mlp_dim,
@@ -549,12 +643,12 @@ class Trainer:
         )
 
     def _build_muon(self, opt_cfg):
-        """Muon on the hidden `nn.Linear` weights of the backbone and feature
-        MLP; AdamW (same betas / eps as `torch.optim.AdamW`) on everything else:
+        """Muon on the hidden `nn.Linear` weights of the backbone, feature
+        MLP and head MLP; AdamW (same betas / eps as `torch.optim.AdamW`) on everything else:
         biases and norms (1-D), the sparse-conv kernels (5-D; Muon would
         orthogonalize their last two dims only), the feature MLP's first layer
-        (input layer) and the GS head (output layer, carries the init scale /
-        opacity in its bias). Returns the optimizer and the per-group peak LRs.
+        (input layer), the input -> head skip projection (reads the input) and
+        the GS head (output layer, carries the init scale / opacity in its bias). Returns the optimizer and the per-group peak LRs.
         Groups: [adamw, muon, muon qkv]."""
         from others.muon_optimizer import Muon
 
@@ -566,6 +660,8 @@ class Trainer:
         if model.feature_mlp is not None:
             linears = [(f"feature_mlp.{n}", m) for n, m in model.feature_mlp.named_modules() if isinstance(m, nn.Linear)]
             hidden += linears[1:]
+        if model.head_mlp is not None:
+            hidden += [(f"head_mlp.{n}", m) for n, m in model.head_mlp.named_modules() if isinstance(m, nn.Linear)]
         # Fused Q/K/V (`Linear(C, 3C)`): orthogonalize each C x C block on its own.
         qkv = [m.weight for n, m in hidden if n.endswith(".qkv")]
         muon = [m.weight for n, m in hidden if not n.endswith(".qkv")]
@@ -618,7 +714,8 @@ class Trainer:
                 _MultiSceneDataset([scene.train_dataset for scene in self.scenes]),
                 collate_fn=_collate_camera_batch,
                 batch_sampler=_RandomSceneBatchSampler(
-                    [len(scene.train_dataset) for scene in self.scenes], data_cfg.train_batch_size
+                    [len(scene.train_dataset) for scene in self.scenes], data_cfg.train_batch_size,
+                    positions=self._view_positions(),
                 ),
                 num_workers=data_cfg.train_num_workers,
                 pin_memory=data_cfg.train_pin_memory,
@@ -743,12 +840,20 @@ class Trainer:
         num_steps = self.cfg.trainer.num_steps
         if self.cfg.trainer.grad_accum_steps < 1:
             raise ValueError(f"trainer.grad_accum_steps must be >= 1, got {self.cfg.trainer.grad_accum_steps}")
+        if self.cfg.trainer.frustum_cull not in ("none", "subset", "full"):
+            raise ValueError(f"trainer.frustum_cull must be none, subset or full, got {self.cfg.trainer.frustum_cull!r}")
+        if self.cfg.trainer.frustum_cull != "none" and self.cfg.input.pos_clamp_percentile > 0:
+            raise ValueError("trainer.frustum_cull with input.pos_clamp_percentile > 0: the clamp radius would follow the culled cloud")
+        if self.cfg.trainer.random_bkgd_mode not in ("color", "pixel"):
+            raise ValueError(f"trainer.random_bkgd_mode must be color or pixel, got {self.cfg.trainer.random_bkgd_mode!r}")
         for self.step in range(self.start_step, num_steps):
             batches = []
             for _ in range(self.cfg.trainer.grad_accum_steps):
                 batch = next(train_iter)
                 scene = self.scenes[int(batch["scene"][0])] if "scene" in batch else self.scenes[0]
-                batch["means"], batch["feat"] = self._train_points(scene)
+                # Unless the loader workers already attached them (DL3DV, `dl3dv.points_in_workers`).
+                if "means" not in batch:
+                    batch["means"], batch["feat"], batch["pos_radius"], batch["cull_keep_frac"] = self._train_points(scene, batch)
                 batches.append(batch)
             start = time.perf_counter()
             metrics = self.train_step(batches)
@@ -773,15 +878,47 @@ class Trainer:
                     self.save_checkpoint()
                 self._barrier()
 
+    def _view_positions(self):
+        """Camera centers of every scene's training views for the kNN view
+        sampler, or None with `data.train_view_sampling="random"`."""
+        mode = self.cfg.data.train_view_sampling
+        if mode not in ("random", "knn"):
+            raise ValueError(f"data.train_view_sampling must be random or knn, got {mode!r}")
+        if mode == "random":
+            return None
+        return [s.parser.camtoworlds[s.train_dataset.indices][:, :3, 3] for s in self.scenes]
+
     def _empty_cuda_cache(self):
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()
 
-    def _train_points(self, scene):
-        """Input points (means, feat) of one training micro-batch: the scene's
-        fixed cloud. `core.trainer_dl3dv` draws a random subset instead."""
-        return scene.means, scene.feat
+    def _train_points(self, scene, batch):
+        """Input points of one training micro-batch: (means, feat, PE radius of
+        the cloud before culling or None, kept fraction). The scene's fixed
+        cloud, frustum-culled to `batch`'s views with `trainer.frustum_cull`.
+        `core.trainer_dl3dv` draws a random subset instead."""
+        if self.cfg.trainer.frustum_cull == "none":
+            return scene.means, scene.feat, None, 1.0
+        means = scene.means.to(self.device, non_blocking=True)
+        keep = self._frustum_mask(means, batch)
+        rows = keep.nonzero().squeeze(1).cpu()
+        return scene.means[rows], scene.feat[rows], self._pe_radius(means), len(rows) / len(keep)
+
+    def _pe_radius(self, means):
+        """The PE divider `r` of `means` (in the scene frame; augmentation
+        scales it by its `s`), None without PE."""
+        if self.cfg.input.pos_encoding == "none":
+            return None
+        return percentile_radius(means, self.cfg.input.pos_percentile)
+
+    def _frustum_mask(self, means, batch):
+        """`frustum_mask` with `batch`'s views. Scene frame (before
+        augmentation, which moves points and cameras together and so keeps
+        visibility)."""
+        height, width = batch["image"].shape[1:3]
+        return frustum_mask(means, batch["camtoworld"], batch["K"], height, width,
+                            self.cfg.trainer.cull_margin, self.cfg.trainer.near_plane)
 
     def _train_batches(self):
         # Re-iterate the loader each epoch (reshuffles). `itertools.cycle` would
@@ -838,6 +975,11 @@ class Trainer:
             # Gaussians with any axis above the tail threshold.
             "scale_num_big": mean("scale_num_big"),
             "opacity_mean": mean("opacity_mean"),
+            # Mean rendered alpha (coverage) over the training views.
+            "alpha_mean": mean("alpha_mean"),
+            # Input points per forward, and the fraction frustum culling kept.
+            "num_points": mean("num_points"),
+            "cull_keep_frac": mean("cull_keep_frac"),
             **({k: mean(k) for k in ("offset_abs_mean", "offset_sat_frac")} if "offset_abs_mean" in parts[0] else {}),
             **({k: mean(k) for k in ("pos_radius", "pe_proj_norm") if k in parts[0]}),
             "mem_gib": torch.cuda.max_memory_allocated(self.device) / 2**30,
@@ -863,13 +1005,18 @@ class Trainer:
         scene); adds `weight` x its gradient to the model's `.grad`. Returns its
         loss terms / stats for logging."""
         coord = batch["means"].to(self.device, non_blocking=True)
-        feat = batch["feat"].to(self.device, non_blocking=True)
+        # fp16 when the DL3DV loader workers attached them: upcast on the GPU.
+        feat = batch["feat"].to(self.device, non_blocking=True).float()
         camtoworlds = batch["camtoworld"].to(self.device, non_blocking=True)  # [B, 4, 4]
         # Random similarity transform of points + cameras (identity if
         # `augment.enabled` is False); renders are unchanged, so the targets are.
-        coord, camtoworlds, grid_coord = augment(
+        coord, camtoworlds, grid_coord, aug_scale = augment(
             self.cfg.augment, coord, camtoworlds, self.cfg.trainer.point_grid_size
         )
+        # With frustum culling: the PE radius of the whole (augmented) cloud.
+        pos_radius = batch.get("pos_radius")
+        if pos_radius is not None:
+            pos_radius = pos_radius * aug_scale
         offset = torch.tensor([coord.shape[0]], device=self.device)
         point = Point(
             coord=coord,
@@ -882,7 +1029,7 @@ class Trainer:
 
         # Predict raw GS params for every Gaussian once, with activations as in
         # `simple_trainer.py`'s `rasterize_splats`.
-        splats = self.model(point)
+        splats = self.model(point, pos_radius=pos_radius)
         # Render/backprop one view at a time into a detached copy of the
         # predictions, then push the accumulated gradient through the model in a
         # single backward: same gradients as rendering the whole batch at once,
@@ -923,7 +1070,7 @@ class Trainer:
             reg.backward(retain_graph=True)
 
         loss_sum = reg.item()
-        l1_sum = ssim_sum = mse_sum = 0.0
+        l1_sum = ssim_sum = mse_sum = alpha_sum = 0.0
         for i in range(num_views):
             render, alpha, _ = rasterization(
                 means=means,
@@ -939,10 +1086,12 @@ class Trainer:
                 near_plane=self.cfg.trainer.near_plane,
                 far_plane=self.cfg.trainer.far_plane,
             )
-            # Rendered over black; composite over a random color, as
-            # `simple_trainer.py` does for `random_bkgd`.
+            # Rendered over black; composite over a random color (per view, as
+            # `simple_trainer.py` does for `random_bkgd`, or per pixel).
             if self.cfg.trainer.random_bkgd:
-                render = render + torch.rand(1, 3, device=self.device) * (1.0 - alpha)
+                bkgd_shape = (1, 3) if self.cfg.trainer.random_bkgd_mode == "color" else (1, height, width, 3)
+                render = render + torch.rand(bkgd_shape, device=self.device) * (1.0 - alpha)
+            alpha_sum += alpha.detach().mean().item() / num_views
             gt = pixels[i : i + 1]
             l1loss = F.l1_loss(render, gt)
             ssimloss = 1.0 - fused_ssim(
@@ -977,6 +1126,9 @@ class Trainer:
                 (scales.detach().amax(dim=-1) > self.cfg.trainer.scale_tail_threshold).sum().item()
             ),
             "opacity_mean": opacities.detach().mean().item(),
+            "alpha_mean": alpha_sum,
+            "num_points": coord.shape[0],
+            "cull_keep_frac": batch.get("cull_keep_frac", 1.0),
             **self._offset_stats(splats),
             **self._pos_stats(),
             "image": image,
