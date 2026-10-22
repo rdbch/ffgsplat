@@ -294,6 +294,99 @@ Restart of the 120-scene run: jobs 770 + 771 (`RESUME=latest`, after 770),
 
 ---
 
+## 2026-10-20 · 019c — input→head skip, per-pixel background, kNN views + frustum cull (10 scenes)
+
+**Change.** On top of 018 (`scripts/019_train_dl3dv_edgs_skip.sh`, all new
+options default off, so 018 is unchanged):
+
+- **input → head skip** ("U-Net style"): LitePT's input `x0 = [rgb |
+  feature-MLP(RoMa) | PE]` (before the stem, which has no identity path) goes
+  to the head as well: `[out | GELU(Linear(x0 → 64))]` → hidden layer 128 +
+  GELU → output linears (`head.skip=concat`, `head.hidden_dim=128`);
+- **colour residual**: `sh0 = (rgb_in − 0.5)/C0 + Δ`, every Gaussian starts at
+  its input colour instead of grey (`head.color_residual`);
+- **per-pixel random background** behind training renders instead of one
+  colour per view (`trainer.random_bkgd_mode=pixel`); eval still on black;
+- **kNN views**: each micro-batch = the next view of the scene's shuffled
+  order + its 7 nearest training views by camera center
+  (`data.train_view_sampling=knn`);
+- **frustum culling** of the input subset to the micro-batch's 8 views, 48 px
+  (5 % of max(W, H)) margin on every side, PE radius from the unculled subset
+  (`trainer.frustum_cull=subset`, `trainer.cull_margin=0.05`); eval uses the
+  whole fixed subset;
+- points drawn / culled / gathered in the loader workers (CPU) instead of the
+  main process (`dl3dv.points_in_workers`).
+
+Setup: the split's 10 `eval_seen` scenes (5 bounded / 5 unbounded,
+`dl3dv.train_on=eval_seen`; eval_seen = them, eval_unseen = the 13), grad
+accum 4 (32 views per update), LR 4e-4, 10k steps, eval every 500, per-pixel
+background, kNN views, the same 500k random points drawn per micro-batch for
+every scene, 3g.71gb slices (memory fraction 1.0). Three runs:
+
+| run | skip + rgb residual | culling | job | wandb |
+|---|---|---|---|---|
+| R0 | – | – | 830 | `gkp90oeq` |
+| R3 | ✓ | – | step in hold 808 | `fba6f624` |
+| R4 | ✓ | subset (model gets the visible part of the 500k) | step in hold 807 | `8xdn5flo` |
+
+R0 → R3: the skip + colour residual; R3 → R4: culling.
+
+Memory on the slice: kNN + culling keeps only 73–88 % of the subset
+(neighbouring video frames see almost the same region, and one view already
+sees most of a bounded scene). Before settling on 500k: 1M / 1.25M and 1M for
+all OOM'd at step 1 (> 68 GB); 650k fit (24–53 GB). At 500k, first steps:
+R0 22–52 GB, R3 30–53 GB, R4 31–46 GB allocated (394–433k points after
+culling); ~3.3–4.7 s/step. Failed / stopped attempts were deleted from wandb.
+
+**Interim results** (checked 2026-10-21 01:45 UTC; R0 / R3 at ~5.7k steps,
+R4 at ~7.5k). All healthy: no OOM / NaN, evals every 500, checkpoints saved.
+
+| run | step | s/step (wall) | reserved | ETA (UTC, 10-21) |
+|---|---|---|---|---|
+| R0 (job 830), no skip | 5700 / 10k | ~4.5 | 53.4 GB | ~07:15 |
+| R3 (hold 808), skip | 5685 / 10k | ~4.5 | 54.4 GB | ~07:15 |
+| R4 (hold 807), skip + cull | 7495 / 10k | ~3.4 | 52.8 GB | ~04:00 |
+| 790 (018 DDP, 120 scenes) | 49.4k / 60k | ~4.5 | – | ~15:00 |
+
+R4 is faster because culling keeps only 56–88 % of the 500k points. Eval
+means (PSNR / SSIM / LPIPS) at step 5499, the last step all three have
+reached:
+
+| run | eval_seen (trained on) | eval_unseen (13) |
+|---|---|---|
+| R0 | 19.76 / 0.656 / 0.420 | 15.77 / 0.553 / 0.519 |
+| R3 | 19.88 / 0.669 / 0.396 | 16.61 / 0.571 / 0.487 |
+| R4 | 19.36 / 0.662 / 0.402 | 16.64 / 0.570 / 0.485 |
+
+eval_unseen PSNR over training:
+
+| step | 499 | 1499 | 2499 | 3499 | 4499 | 5499 |
+|---|---|---|---|---|---|---|
+| R0 | 14.01 | 15.77 | 15.92 | 15.78 | 16.07 | 15.77 |
+| R3 | 15.26 | 16.42 | 16.66 | 16.51 | 16.61 | 16.61 |
+| R4 | 15.09 | 16.40 | 16.49 | 16.54 | 16.41 | 16.64 |
+
+- Skip + colour residual (R0 → R3): **+0.85 dB unseen**, LPIPS better on both
+  sets; the lead is there from step 500 on.
+- Culling (R3 → R4): unseen the same, seen within step-to-step noise (R4 seen
+  19.72 at 6999), ~25 % faster.
+- All three: unseen flat after ~2k steps while seen keeps rising, the same
+  pattern as job 790 (expected with 10 training scenes).
+
+**Final results (step 10k): pending — to be added when the runs finish**
+(estimated R4 ~04:00, R0 / R3 ~07:15 UTC on 2026-10-21).
+
+**Full run (120 scenes).** The R4 config (skip + colour residual, per-pixel
+background, kNN views, culling) on the whole training split, otherwise as
+018 / job 790 (1M / 1.25M points, 64 views per update, LR 4e-4, 60k steps,
+eval every 2000), 2 × full H200, 700G RAM. The skip should give back the
+per-point detail LitePT's voxel pooling merges away. Submitted 2026-10-21 as
+jobs 831 + 832 (`019_submit.sh c-full-chain`, `RESUME=latest`, 832 after
+831), pending for GPUs (starts when 790 ends, ~15:00 UTC). Compare with 790.
+Results: pending.
+
+---
+
 ## Open questions / next
 
 - Longer-term goal: chunked reconstruction with chunk-relative PE — see
