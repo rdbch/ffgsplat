@@ -201,7 +201,8 @@ def load_edgs_points(cfg: InputConfig, scene_dir: str, parser, train_indices) ->
 
     Returns {"means": [N, 3] f32, "rgb": [N, 3] f32 in [0, 1], "features": [N, D] f32
     standardized or None, "feature_dims": {block: d}, "is_sky": [N] bool (sky rows
-    last; all False unless `cfg.sky`), "info": {...}}.
+    last; all False unless `cfg.sky`), "scene_mu" [3] / "scene_sigma": mean and isotropic
+    sigma of all valid scene points (parser frame), "info": {...}}.
 
     Checks (raise on failure):
       - the EDGS reference cameras are exactly the parser's training views, so held-out
@@ -300,6 +301,14 @@ def load_edgs_points(cfg: InputConfig, scene_dir: str, parser, train_indices) ->
         ref = features[:num_scene]
         features = (features - ref.mean(0)) / (ref.std(0) + 1e-6)
 
+    # Mean / isotropic sigma of ALL valid scene points (not just the subset) in the
+    # parser's frame, for the PE radius (`pos_radius="sigma"`): the same r whatever subset
+    # is drawn, and the sky sphere (built from all of them) stays inside |p| <= 1.
+    scene_all = np.flatnonzero(valid & ~is_sky_all) if cfg.drop_invalid else np.flatnonzero(~is_sky_all)
+    xyz_all = transform_points(parser.transform, np.stack([vertex["x"], vertex["y"], vertex["z"]], 1)[scene_all].astype(np.float64))
+    scene_mu = xyz_all.mean(0)
+    scene_sigma = float(np.sqrt(((xyz_all - scene_mu) ** 2).sum(1).mean() / 3))
+    del xyz_all
     if "complexity" in npz.files:
         # Median complexity of all valid scene points vs the ones used (the subset's bias).
         cplx = npz["complexity"]
@@ -320,4 +329,4 @@ def load_edgs_points(cfg: InputConfig, scene_dir: str, parser, train_indices) ->
         "pca_basis_sha1": meta.get("pca_basis_sha1"),
     }
     return {"means": means, "rgb": rgb, "features": features, "feature_dims": feature_dims,
-            "is_sky": is_sky, "info": info}
+            "is_sky": is_sky, "scene_mu": scene_mu, "scene_sigma": scene_sigma, "info": info}

@@ -770,6 +770,7 @@ class Trainer:
         # initialization (edgs, already in the parser's normalized frame).
         image_feat = None
         fixed_pos_radius = None
+        scene_stats = None          # (mu, sigma) of all valid scene points (EDGS)
         if self.cfg.input.pos_radius not in ("percentile", "sigma"):
             raise ValueError(f"input.pos_radius must be percentile or sigma, got {self.cfg.input.pos_radius!r}")
         if self.cfg.input.sky and self.cfg.input.source != "edgs":
@@ -789,6 +790,7 @@ class Trainer:
                 flag = edgs["is_sky"].astype(np.float32)[:, None]
                 image_feat = flag if image_feat is None else np.concatenate([image_feat, flag], 1)
             print(f"[{name}] sky points: {info['num_sky']}")
+            scene_stats = (edgs["scene_mu"], edgs["scene_sigma"])
             if "complexity_median_used" in info:
                 print(f"[{name}] subset {info['subset']}: median complexity {info['complexity_median_used']:.3f} "
                       f"(all valid scene points {info['complexity_median_all']:.3f})")
@@ -839,11 +841,15 @@ class Trainer:
         self.feature_channels = channels
 
         if self.cfg.input.pos_radius == "sigma":
-            # |mu| + k sigma of the scene points (sky rows, flagged in the last
-            # channel, excluded), in the scene frame.
-            pts = means[feat[:, -1] < 0.5] if self.cfg.input.sky else means
-            mu = pts.double().mean(0)
-            sigma = ((pts.double() - mu) ** 2).sum(1).mean().div(3).sqrt()
+            # |mu| + k sigma of the scene points, in the scene frame: of ALL valid ones
+            # with EDGS (independent of the subset drawn), else of the loaded points
+            # (sky rows, flagged in the last channel, excluded).
+            if scene_stats is not None:
+                mu, sigma = torch.from_numpy(scene_stats[0]), torch.tensor(scene_stats[1], dtype=torch.float64)
+            else:
+                pts = means[feat[:, -1] < 0.5] if self.cfg.input.sky else means
+                mu = pts.double().mean(0)
+                sigma = ((pts.double() - mu) ** 2).sum(1).mean().div(3).sqrt()
             fixed_pos_radius = float(mu.norm() + self.cfg.input.pos_sigma_k * sigma)
             print(f"[{name}] PE radius |mu| + {self.cfg.input.pos_sigma_k:g} sigma = {mu.norm():.4f} + "
                   f"{self.cfg.input.pos_sigma_k:g} x {sigma:.4f} = {fixed_pos_radius:.4f}")

@@ -87,6 +87,9 @@ class DL3DVConfig:
     # "eval_seen" (its 10 scenes, 5 bounded / 5 unbounded; eval_seen = them).
     # `train_environment` / `train_limit` filter that list.
     train_on: str = "train"
+    # Evaluate only the first `eval_unseen_limit` of the split's eval_unseen scenes
+    # (null = all 13).
+    eval_unseen_limit: Optional[int] = None
     # Debugging: train on the first `lazy_train_scenes` training scenes only and
     # load each scene's points on first use instead of all at startup.
     lazy: bool = False
@@ -118,13 +121,25 @@ class DL3DVScene(Scene):
     eval_view: Optional["DL3DVScene"] = None
     # PE radius of all of `means` (frustum_cull="full"), set on first use.
     pos_radius: Optional[float] = None
+    # Sky rows (`input.sky`): the last `num_sky` rows of `means` / `feat`, all of
+    # them in every forward on top of the `num_points` scene points.
+    num_sky: int = 0
+    # Sky rows dropped by the outlier filter (beyond the voxel grid's extent).
+    num_sky_removed: int = 0
+
+
+def _sky_rows(scene):
+    """Row indices of `scene`'s sky points (the last `num_sky` rows)."""
+    n = scene.means.shape[0]
+    return torch.arange(n - scene.num_sky, n)
 
 
 def _eval_rows(scene, seed):
-    """The fixed subset of `scene`'s points used for eval (same every eval / run)."""
+    """The fixed subset of `scene`'s points used for eval (same every eval / run),
+    + all sky rows."""
     rng = np.random.default_rng(seed)
-    rows = np.sort(rng.choice(scene.means.shape[0], size=scene.num_points, replace=False))
-    return torch.from_numpy(rows)
+    rows = np.sort(rng.choice(scene.means.shape[0] - scene.num_sky, size=scene.num_points, replace=False))
+    return torch.cat([torch.from_numpy(rows), _sky_rows(scene)])
 
 
 def _sample_points(scene, batch, args):
@@ -132,9 +147,14 @@ def _sample_points(scene, batch, args):
     eval subset without `args["resample"]`), frustum-culled to `batch`'s views
     with `args["cull"]`: "subset" culls the subset, "full" culls all points and
     draws the subset from the visible ones (resampled only). On the CPU; only
-    the kept rows are gathered. Returns (means fp32, feat fp16, PE radius of
-    the cloud before culling or None, kept fraction)."""
+    the kept rows are gathered. Sky rows (`scene.num_sky`) all go in on top of
+    the subset (culled the same way). Returns (means fp32, feat fp16, PE radius
+    of the cloud before culling or None, kept fraction); the PE radius is
+    `scene.fixed_pos_radius` when set (`input.pos_radius=sigma`)."""
     cull, pe = args["cull"], args["pe_percentile"]
+    if scene.fixed_pos_radius is not None:
+        pe = None
+    num_scene = scene.means.shape[0] - scene.num_sky
     pos_radius, keep_frac = None, 1.0
     if cull != "none":
         height, width = batch["image"].shape[1:3]
@@ -147,15 +167,22 @@ def _sample_points(scene, batch, args):
         if pe is not None and scene.pos_radius is None:
             scene.pos_radius = percentile_radius(scene.means, pe)
         pos_radius, keep_frac = scene.pos_radius, len(visible) / len(scene.means)
-        rows = visible[torch.randperm(len(visible))[: scene.num_points]]
+        vis_sky = visible[visible >= num_scene]
+        visible = visible[visible < num_scene]
+        rows = torch.cat([visible[torch.randperm(len(visible))[: scene.num_points]], vis_sky])
     else:
-        rows = torch.randperm(scene.means.shape[0])[: scene.num_points] if args["resample"] else _eval_rows(scene, args["seed"])
+        if args["resample"]:
+            rows = torch.cat([torch.randperm(num_scene)[: scene.num_points], _sky_rows(scene)])
+        else:
+            rows = _eval_rows(scene, args["seed"])
         if cull != "none":
             sub_means = scene.means[rows]
             keep = mask(sub_means)
             pos_radius = percentile_radius(sub_means, pe) if pe is not None else None
             keep_frac = keep.float().mean().item()
             rows = rows[keep]
+    if scene.fixed_pos_radius is not None:
+        pos_radius = scene.fixed_pos_radius
     return scene.means[rows], scene.feat[rows], pos_radius, keep_frac
 
 
@@ -195,7 +222,7 @@ class TrainerDL3DV(Trainer):
             raise ValueError(f"dl3dv.train_on must be train or eval_seen, got {dl3dv.train_on!r}")
         train_names = self.split[dl3dv.train_on]
         seen_names = self.split["eval_seen"]
-        unseen_names = self.split["eval_unseen"]
+        unseen_names = self.split["eval_unseen"][: dl3dv.eval_unseen_limit]
         if dl3dv.train_environment is not None or dl3dv.train_limit is not None:
             if dl3dv.train_environment is not None:
                 train_names = [n for n in train_names if self.split["environment"][n] == dl3dv.train_environment]
@@ -214,7 +241,8 @@ class TrainerDL3DV(Trainer):
         bases = {sha for _, _, sha in scenes}
         if len(widths) != 1 or len(bases) != 1:
             raise ValueError(f"scenes differ in feature width {widths} / PCA basis {bases}")
-        self.feature_channels = widths.pop()
+        # + the sky flag (`input.sky`), the last feature channel as in `Trainer`.
+        self.feature_channels = widths.pop() + int(self.cfg.input.sky)
 
         self.scenes = [by_name[name][0] for name in train_names]
         self.eval_seen = [by_name[name][0] for name in seen_names]
@@ -312,16 +340,34 @@ class TrainerDL3DV(Trainer):
         parts = [edgs["rgb"][keep]] if self.direct_channels else []
         if edgs["features"] is not None:
             parts.append(edgs["features"][keep])
+        if self.cfg.input.sky:
+            # Sky flag = last feature channel (unstandardized), as in `Trainer._build_scene`.
+            parts.append(edgs["is_sky"][keep, None].astype(np.float32))
         scene.feat = torch.from_numpy(np.concatenate(parts, axis=1).astype(np.float16))
         scene.means = torch.from_numpy(means[keep])
+        is_sky = edgs["is_sky"][keep]
+        scene.num_sky = int(is_sky.sum())
+        scene.num_sky_removed = int((edgs["is_sky"] & ~keep).sum())
+        if scene.num_sky and is_sky[: len(is_sky) - scene.num_sky].any():
+            raise ValueError(f"[{scene.name[:8]}] sky rows are not the last rows")
+
+        if self.cfg.input.pos_radius == "sigma":
+            # |mu| + k sigma of all valid scene points (as `Trainer._build_scene`).
+            mu, sigma = edgs["scene_mu"], edgs["scene_sigma"]
+            scene.fixed_pos_radius = float(np.linalg.norm(mu) + self.cfg.input.pos_sigma_k * sigma)
+        elif self.cfg.input.pos_radius != "percentile":
+            raise ValueError(f"input.pos_radius must be percentile or sigma, got {self.cfg.input.pos_radius!r}")
 
         target = self.cfg.dl3dv.points_bounded if scene.environment == "bounded" else self.cfg.dl3dv.points_unbounded
-        scene.num_points = min(target, len(scene.means))
+        scene.num_points = min(target, len(scene.means) - scene.num_sky)
         print(
             f"[{scene.name[:8]}] {scene.environment}: {len(scene.means)} points ({info['num_valid']} valid, "
             f"{(~keep).sum()} outliers removed), {scene.num_points} per forward; {len(scene.train_dataset)} train / "
             f"{len(scene.eval_dataset)} eval views; reprojection median {info['align_median_px']:.2f} px; "
             f"scale {scene.scale:.3f}, EDGS r95 {np.percentile(np.linalg.norm(means[keep], axis=1), 95):.2f}"
+            + (f"; {scene.num_sky} sky points (all per forward, {scene.num_sky_removed} removed as outliers)"
+               if scene.num_sky or scene.num_sky_removed else "")
+            + (f"; PE radius {scene.fixed_pos_radius:.3f}" if scene.fixed_pos_radius is not None else "")
         )
 
     def _eval_rows(self, scene):
@@ -342,6 +388,7 @@ class TrainerDL3DV(Trainer):
                 scene.name, scene.parser, scene.train_dataset, scene.eval_dataset, scene.eval_loader,
                 scene.means[rows].contiguous(), scene.feat[rows].float(),
                 environment=scene.environment, num_points=scene.num_points,
+                fixed_pos_radius=scene.fixed_pos_radius,
             )
             if loaded_here:
                 scene.means = scene.feat = None
