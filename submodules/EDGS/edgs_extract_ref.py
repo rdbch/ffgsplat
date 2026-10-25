@@ -121,6 +121,21 @@ def parse_args(argv=None):
     ft.add_argument("--pca_basis", required=True,
                     help="Global basis from edgs_fit_pca.py. Its blocks decide which "
                          "RoMa strides are sampled.")
+    ft.add_argument("--feat_native", action="store_true",
+                    help="VGG on the image at its own resolution, DINOv2 at the native aspect "
+                         "(sizes rounded to multiples of 14, pos embed interpolated) instead of "
+                         "RoMa's coarse resolution (MultiScaleFeatureExtractor native=True).")
+    ft.add_argument("--dino_stride", type=int, default=14,
+                    help="DINOv2 patch stride with --feat_native (7 = overlapping patches).")
+
+    mt = p.add_argument_group("matching resolution (defaults = EDGS: 560 x 560, no refinement)")
+    mt.add_argument("--roma_coarse", default=None,
+                    help="RoMa coarse resolution 'H,W' (multiples of 14), or 'aspect' = 560 high "
+                         "at the first training image's aspect. Default: RoMa's 560 x 560.")
+    mt.add_argument("--roma_refine", default=None,
+                    help="Second RoMa pass (refiners only) at 'H,W', or 'native' = the image "
+                         "size rounded to multiples of 8, as matcher.match does with "
+                         "upsample_preds. Default: none (flow from the coarse pass).")
 
     sky = p.add_argument_group("sky points (third step, see the module docstring)")
     sky.add_argument("--sky", action="store_true", help="Append sky points (is_sky = True).")
@@ -239,6 +254,24 @@ def init_with_ref_features(gaussians, scene, cfg, roma_model, device, extractor,
 
     record = {key: np.concatenate(chunks, axis=0) for key, chunks in rec.items()}
     return record, selected_indices, float(np.mean(uv_check))
+
+
+def roma_resolutions(args, cam):
+    """(coarse (H, W) or None, refine (H, W) or None) from --roma_coarse / --roma_refine."""
+    h, w = cam.image_height, cam.image_width
+
+    def parse(text, multiple, auto):
+        if text is None:
+            return None
+        if text in auto:
+            return auto[text]
+        hh, ww = (int(v) for v in text.split(","))
+        assert hh % multiple == 0 and ww % multiple == 0, (text, multiple)
+        return hh, ww
+
+    coarse = parse(args.roma_coarse, 14, {"aspect": (560, max(14, round(560 * w / h / 14) * 14))})
+    refine = parse(args.roma_refine, 8, {"native": (max(8, round(h / 8) * 8), max(8, round(w / 8) * 8))})
+    return coarse, refine
 
 
 def project(cam, xyz):
@@ -445,12 +478,19 @@ def main(argv=None):
     gaussians.training_setup(load_gs_optimization_defaults())
 
     print(f"[2/5] Loading RoMa ({args.roma_model}) and PCA basis {args.pca_basis}")
-    roma_model = (roma_indoor if args.roma_model == "indoors" else roma_outdoor)(device=device)
+    coarse, refine = roma_resolutions(args, cameras[0])
+    roma_kwargs = {} if coarse is None else {"coarse_res": coarse}
+    roma_model = (roma_indoor if args.roma_model == "indoors" else roma_outdoor)(
+        device=device, **roma_kwargs)
     roma_model.upsample_preds = False
     roma_model.symmetric = False
+    roma_model.refine_res = refine
+    print(f"      RoMa coarse {roma_model.h_resized}x{roma_model.w_resized}, refine {refine}; "
+          f"features {'native, DINO stride ' + str(args.dino_stride) if args.feat_native else 'at the coarse resolution'}")
     pca = BlockPCA.load(args.pca_basis, device)
     strides = sorted(int(n[len("roma"):]) for n in pca.dims)
-    extractor = MultiScaleFeatureExtractor(roma_model, strides, device=device, cache_size=1)
+    extractor = MultiScaleFeatureExtractor(roma_model, strides, device=device, cache_size=1,
+                                           native=args.feat_native, dino_stride=args.dino_stride)
     spans, total_dim = pca.layout()
     print(f"      blocks {spans} -> {total_dim} dims")
 
@@ -508,9 +548,13 @@ def main(argv=None):
         "pca_basis": os.path.abspath(args.pca_basis),
         "pca_basis_sha1": sha1(args.pca_basis),
         "pca_explained_variance": {n: float(v.sum()) for n, v in pca.explained.items()},
-        "features_from": "reference view only, RoMa encoder input "
-                         f"{roma_model.h_resized}x{roma_model.w_resized}, "
-                         "L2-normalized per block before PCA",
+        "features_from": "reference view only, "
+                         + (f"VGG at the native resolution, DINOv2 at the native aspect, stride {args.dino_stride}, "
+                            if args.feat_native else
+                            f"RoMa encoder input {roma_model.h_resized}x{roma_model.w_resized}, ")
+                         + "L2-normalized per block before PCA",
+        "roma_matching": {"coarse": [roma_model.h_resized, roma_model.w_resized],
+                          "refine": list(roma_model.refine_res) if roma_model.refine_res else None},
         "camera_names": [c.image_name for c in cameras],
         "reference_cameras": [int(i) for i in selected_indices],
         "num_cameras_used": len(cameras),

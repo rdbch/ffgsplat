@@ -76,6 +76,10 @@ def parse_args(argv=None):
     p.add_argument("--max_images_per_scene", type=int, default=None,
                    help="Evenly spaced subset of each scene's training images.")
     p.add_argument("--roma_model", choices=["outdoors", "indoors"], default="outdoors")
+    p.add_argument("--feat_native", action="store_true",
+                   help="Native-resolution features (MultiScaleFeatureExtractor native=True), "
+                        "as edgs_extract_ref.py --feat_native.")
+    p.add_argument("--dino_stride", type=int, default=14)
     p.add_argument("--device", default="cuda:0")
     return p.parse_args(argv)
 
@@ -99,8 +103,11 @@ def main(argv=None):
     t0 = time.time()
 
     roma_model = (roma_indoor if args.roma_model == "indoors" else roma_outdoor)(device=device)
-    extractor = MultiScaleFeatureExtractor(roma_model, strides, device=device, cache_size=1)
-    print(f"blocks {extractor.block_names}, RoMa input {roma_model.h_resized}x{roma_model.w_resized}")
+    extractor = MultiScaleFeatureExtractor(roma_model, strides, device=device, cache_size=1,
+                                           native=args.feat_native, dino_stride=args.dino_stride)
+    print(f"blocks {extractor.block_names}, "
+          + (f"native features, DINO stride {args.dino_stride}" if args.feat_native
+             else f"RoMa input {roma_model.h_resized}x{roma_model.w_resized}"))
 
     images = []
     for spec in args.scenes:

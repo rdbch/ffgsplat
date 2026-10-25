@@ -18,6 +18,7 @@ from romatch import roma_outdoor, roma_indoor
 from utils.sh_utils import RGB2SH
 from romatch.utils import get_tuple_transform_ops
 
+import math
 import time
 from collections import defaultdict
 from tqdm import tqdm
@@ -143,13 +144,25 @@ def compute_warp_and_confidence(viewpoint_cam1, viewpoint_cam2, roma_model, devi
     corresps = roma_model.forward(batch) if not roma_model.symmetric else roma_model.forward_symmetric(batch)
     finest_scale = 1
     hs, ws = roma_model.upsample_res if roma_model.upsample_preds else (hs, ws)
+    coarse_corresps = corresps
+
+    refine_res = getattr(roma_model, "refine_res", None)
+    if refine_res is not None:
+        # RoMa's own two-stage match (matcher.match with upsample_preds): the refiners run
+        # again at refine_res, starting from the coarse flow; DINO is not re-run.
+        hs, ws = refine_res
+        im_A_hr, im_B_hr = get_tuple_transform_ops(resize=(hs, ws), normalize=True)((imA, imB))
+        scale_factor = math.sqrt(hs * ws / (roma_model.w_resized * roma_model.h_resized))
+        batch = {"im_A": im_A_hr[None].to(device), "im_B": im_B_hr[None].to(device),
+                 "corresps": {k: corresps[finest_scale][k] for k in ("flow", "certainty")}}
+        corresps = roma_model.forward(batch, batched=True, upsample=True, scale_factor=scale_factor)
 
     # Process certainty and warp
     certainty = corresps[finest_scale]["certainty"]
     im_A_to_im_B = corresps[finest_scale]["flow"]
     if roma_model.attenuate_cert:
         low_res_certainty = F.interpolate(
-            corresps[16]["certainty"], size=(hs, ws), align_corners=False, mode="bilinear"
+            coarse_corresps[16]["certainty"], size=(hs, ws), align_corners=False, mode="bilinear"
         )
         certainty -= 0.5 * low_res_certainty * (low_res_certainty < 0)
 

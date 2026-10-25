@@ -111,6 +111,24 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
+def use_sdpa_attention():
+    """
+    Route RoMa's DINOv2 attention through F.scaled_dot_product_attention. Without
+    xFormers its fallback builds the N x N matrix (16 heads x 32k^2 tokens = 34 GB at
+    bonsai's resolution with stride 7). Same maths; only called for native features.
+    """
+    from romatch.models.transformer.layers import attention
+
+    def forward(self, x, attn_bias=None):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        x = F.scaled_dot_product_attention(qkv[0], qkv[1], qkv[2])
+        return self.proj_drop(self.proj(x.transpose(1, 2).reshape(B, N, C)))
+
+    attention.Attention.forward = forward
+    attention.MemEffAttention.forward = forward
+
+
 # ==================================================================================
 # Arguments
 # ==================================================================================
@@ -311,20 +329,36 @@ class MultiScaleFeatureExtractor:
     """
 
     def __init__(self, roma_model, roma_scales, dino_model=None, dino_res=560,
-                 device="cuda", cache_size=8):
+                 device="cuda", cache_size=8, native=False, dino_stride=14):
+        """
+        native=False (default): the RoMa pyramid of the image resized to RoMa's coarse
+        resolution (h_resized x w_resized), exactly as the matcher sees it.
+        native=True: VGG on the image at its own resolution (roma1/2/4/8 at H, H/2, ...),
+        DINOv2 on the image resized to the nearest multiples of 14 (native aspect, the
+        positional embedding interpolated), with patch stride dino_stride (14 = DINOv2's
+        own; 7 = overlapping 14 x 14 patches, ~2x denser tokens per side).
+        """
         self.roma = roma_model
         self.roma_scales = list(roma_scales)
         self.dino = dino_model
         self.dino_res = dino_res
         self.device = device
         self.cache_size = max(1, cache_size)
+        self.native = native
+        self.dino_stride = dino_stride
         self._cache = {}
         self._order = []
+        self._geom = {}   # block -> (offset, spacing, in_h, in_w) for non-standard grids
+        if dino_stride != 14 and not native:
+            raise ValueError("dino_stride != 14 needs native=True")
+        if native:
+            use_sdpa_attention()
 
         hs, ws = roma_model.h_resized, roma_model.w_resized
         # Same preprocessing RoMa uses for matching, so sampled features correspond to
         # what actually produced the warps.
         self._roma_tf = get_tuple_transform_ops(resize=(hs, ws), normalize=True)
+        self._native_tf = get_tuple_transform_ops(resize=None, normalize=True)
 
         self.block_names = [f"roma{s}" for s in self.roma_scales]
         if self.dino is not None:
@@ -346,6 +380,8 @@ class MultiScaleFeatureExtractor:
         concatenate im_A and im_B into one batch (matcher.py:458), so going through
         self.encoder directly is both cheaper and unambiguous.
         """
+        if self.native:
+            return self._native_pyramid(pil_image)
         im, _ = self._roma_tf((pil_image, pil_image))
         x = im[None].to(self.device)
 
@@ -371,6 +407,51 @@ class MultiScaleFeatureExtractor:
 
         return {int(k): v[0] for k, v in pyramid.items()
                 if torch.is_tensor(v) and v.dim() == 4}
+
+    def _native_pyramid(self, pil_image):
+        """
+        native=True: VGG19-bn of RoMa's encoder on the image itself, DINOv2 on the image
+        resized to (round14(H), round14(W)) with patch stride self.dino_stride. Key 16 =
+        DINO as in _roma_pyramid. With stride s != 14, token i covers input pixels
+        [s i, s i + 14), centre s i + 7: sample() maps keypoints onto that grid.
+        """
+        enc = self.roma.encoder
+        x, _ = self._native_tf((pil_image, pil_image))
+        x = x[None].to(self.device)
+        with torch.no_grad():
+            pyramid = {int(k): v[0].float() for k, v in enc.cnn(x).items()}
+
+        w, h = pil_image.size
+        hd, wd = max(14, round(h / 14) * 14), max(14, round(w / 14) * 14)
+        xd, _ = get_tuple_transform_ops(resize=(hd, wd), normalize=True)((pil_image, pil_image))
+        vit = enc.dinov2_vitl14[0]
+        if next(vit.parameters()).device != x.device:
+            enc.dinov2_vitl14[0] = vit = vit.to(x.device).to(enc.amp_dtype)
+        dtype = next(vit.parameters()).dtype
+        s = self.dino_stride
+        with torch.no_grad():
+            xd = xd[None].to(self.device, dtype)
+            if s == 14:
+                tok = vit.forward_features(xd)["x_norm_patchtokens"]
+                n, m = hd // 14, wd // 14
+            else:
+                proj = vit.patch_embed.proj
+                t = F.conv2d(xd, proj.weight, proj.bias, stride=s)
+                n, m = t.shape[2:]
+                t = vit.patch_embed.norm(t.flatten(2).transpose(1, 2))
+                pos = vit.pos_embed.float()
+                g = int(round((pos.shape[1] - 1) ** 0.5))
+                patch_pos = F.interpolate(pos[:, 1:].reshape(1, g, g, -1).permute(0, 3, 1, 2),
+                                          size=(n, m), mode="bicubic", align_corners=False)
+                patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, n * m, -1).to(t.dtype)
+                t = torch.cat([vit.cls_token.to(t.dtype) + pos[:, :1].to(t.dtype),
+                               t + patch_pos], dim=1)
+                for blk in vit.blocks:
+                    t = blk(t)
+                tok = vit.norm(t)[:, 1:]
+                self._geom["roma16"] = (7.0, float(s), hd, wd)
+        pyramid[16] = tok[0].T.reshape(-1, n, m).float()
+        return pyramid
 
     def _dino_map(self, pil_image):
         """(C, h, w) DINOv2 patch tokens at stride 14."""
@@ -427,6 +508,16 @@ class MultiScaleFeatureExtractor:
 
         out = {}
         for name, fmap in blocks.items():
+            if name in self._geom:
+                # cell centres at offset + spacing * i (input pixels), not at (i + 0.5) / n
+                offset, spacing, in_h, in_w = self._geom[name]
+                n, m = fmap.shape[1:]
+                u = ((grid[..., 0] + 1) / 2 * in_w - offset) / spacing / max(m - 1, 1) * 2 - 1
+                v = ((grid[..., 1] + 1) / 2 * in_h - offset) / spacing / max(n - 1, 1) * 2 - 1
+                sampled = F.grid_sample(fmap[None], torch.stack([u, v], -1), mode="bilinear",
+                                        padding_mode="border", align_corners=True)
+                out[name] = F.normalize(sampled[0, :, :, 0].T.contiguous(), dim=1)
+                continue
             sampled = F.grid_sample(fmap[None], grid, mode="bilinear",
                                     padding_mode="border", align_corners=False)
             out[name] = F.normalize(sampled[0, :, :, 0].T.contiguous(), dim=1)
