@@ -105,6 +105,12 @@ class InputConfig:
     # every point incl. the sky has |p| <= 1; the same r with or without `sky`.
     pos_radius: str = "percentile"
     pos_sigma_k: float = 4.0
+    # Where mu / sigma for `pos_radius="sigma"` come from: "points" = mean / std of the
+    # valid scene points (above); "sky" = the sky sphere stored by the extraction
+    # (features_meta.json "sky": centre, sigma; e.g. --sky_sigma_mode mad), moved into
+    # the training frame, so the PE sphere is exactly the sky sphere (with pos_sigma_k
+    # = its sigma_k) however it was estimated.
+    sigma_from: str = "points"
     # Alignment check: fail if the median distance (pixels) between the projected
     # EDGS points and the pixels they were triangulated from exceeds this.
     max_align_error_px: float = 3.0
@@ -309,6 +315,16 @@ def load_edgs_points(cfg: InputConfig, scene_dir: str, parser, train_indices) ->
     scene_mu = xyz_all.mean(0)
     scene_sigma = float(np.sqrt(((xyz_all - scene_mu) ** 2).sum(1).mean() / 3))
     del xyz_all
+    if cfg.sigma_from == "sky":
+        if "sky" not in meta:
+            raise ValueError(f"{scene_dir}: input.sigma_from=sky but the extraction has no sky sphere")
+        # the parser transform is a similarity: its scale is |det(A)|^(1/3)
+        scale = float(abs(np.linalg.det(np.asarray(parser.transform)[:3, :3])) ** (1 / 3))
+        scene_mu = transform_points(parser.transform, np.asarray(meta["sky"]["centre"], np.float64)[None])[0]
+        scene_sigma = float(meta["sky"]["sigma"]) * scale
+    elif cfg.sigma_from != "points":
+        raise ValueError(f"input.sigma_from must be points or sky, got {cfg.sigma_from!r}")
+
     if "complexity" in npz.files:
         # Median complexity of all valid scene points vs the ones used (the subset's bias).
         cplx = npz["complexity"]

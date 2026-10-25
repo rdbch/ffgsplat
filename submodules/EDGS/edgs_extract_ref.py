@@ -140,6 +140,14 @@ def parse_args(argv=None):
     sky = p.add_argument_group("sky points (third step, see the module docstring)")
     sky.add_argument("--sky", action="store_true", help="Append sky points (is_sky = True).")
     sky.add_argument("--sky_sigma_k", type=float, default=4.0, help="Sphere radius in sigmas.")
+    sky.add_argument("--sky_sigma_mode", choices=["std", "mad", "trim"], default="std",
+                     help="std: centre = mean, sigma = sqrt(tr(Sigma) / 3) of the valid points. "
+                          "mad: centre = per-axis median, sigma = sqrt(mean over axes of "
+                          "(1.4826 MAD)^2) (too small for scenes with a wide background). "
+                          "trim: std of the points left after dropping the --sky_trim farthest "
+                          "from the per-axis median (robust to far mis-triangulated points).")
+    sky.add_argument("--sky_trim", type=float, default=0.01,
+                     help="Fraction of the valid points dropped before the fit (--sky_sigma_mode trim).")
     sky.add_argument("--sky_points", type=int, default=200_000, help="Lattice points before culling.")
     sky.add_argument("--sky_points_per_voxel", type=float, default=4.0)
 
@@ -327,14 +335,23 @@ def add_sky_points(gaussians, record, cameras, extractor, pca, args, device):
 
     # Sphere + voxel size.
     pts = torch.from_numpy(record["xyz"][valid]).double().to(device)
-    centre = pts.mean(0)
-    sigma = float(torch.sqrt(((pts - centre) ** 2).sum(1).mean() / 3))
+    if args.sky_sigma_mode == "mad":
+        centre = pts.median(0).values
+        mad = 1.4826 * (pts - centre).abs().median(0).values
+        sigma = float(torch.sqrt((mad ** 2).mean()))
+    else:
+        if args.sky_sigma_mode == "trim":
+            d = (pts - pts.median(0).values).norm(dim=1)
+            pts = pts[d <= d.kthvalue(max(1, int(round((1 - args.sky_trim) * len(d))))).values]
+        centre = pts.mean(0)
+        sigma = float(torch.sqrt(((pts - centre) ** 2).sum(1).mean() / 3))
+        pts = torch.from_numpy(record["xyz"][valid]).double().to(device)
     radius = args.sky_sigma_k * sigma
     outside = float(((pts - centre).norm(dim=1) > radius).double().mean())
     sky = fibonacci_sphere(args.sky_points, centre, radius)
     origin = centre - radius
     g, g_nominal, ppv = sky_voxel_size(sky, origin, radius, args.sky_points_per_voxel)
-    print(f"      sigma {sigma:.4f}, R = {args.sky_sigma_k:g} sigma = {radius:.4f} "
+    print(f"      sigma ({args.sky_sigma_mode}) {sigma:.4f}, R = {args.sky_sigma_k:g} sigma = {radius:.4f} "
           f"({100 * outside:.2f} % of the valid points outside); voxel {g:.5f} "
           f"(nominal {g_nominal:.5f}), {ppv:.2f} points / voxel")
 
@@ -398,7 +415,8 @@ def add_sky_points(gaussians, record, cameras, extractor, pca, args, device):
     record["is_sky"] = np.concatenate([np.zeros(n_old, dtype=bool), np.ones(m, dtype=bool)])
     return {
         "rows": [n_old, n_old + m], "num_points": m, "lattice_points": args.sky_points,
-        "sigma_k": args.sky_sigma_k, "sigma": sigma, "centre": centre.cpu().numpy().tolist(),
+        "sigma_k": args.sky_sigma_k, "sigma": sigma, "sigma_mode": args.sky_sigma_mode,
+        "trim": args.sky_trim if args.sky_sigma_mode == "trim" else None, "centre": centre.cpu().numpy().tolist(),
         "radius": radius, "valid_points_outside": outside,
         "points_per_voxel_target": args.sky_points_per_voxel, "points_per_voxel": ppv,
         "voxel_size": g, "voxel_size_nominal": g_nominal, "voxel_origin": origin.cpu().numpy().tolist(),
