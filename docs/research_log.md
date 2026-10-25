@@ -431,7 +431,286 @@ sky opacity 0.10 → 0.17 and scale 0.010 → 0.019 by step 100 (the sky is bein
 used); ~0.9 s/step (→ ~5 h for 20k), 17 GB allocated / 33 GB reserved (sky) vs
 22 GB (no sky).
 
-**Results: running** (launched 2026-10-22).
+**Results** (bonsai test views, 37 images; 855 5 h 18 min, 856 4 h 37 min):
+
+| run | PSNR @20k | SSIM | LPIPS | best PSNR (step) |
+|---|---|---|---|---|
+| 020-sky | **24.95** | **0.820** | **0.324** | 24.97 (18k) |
+| 020-nosky | 24.49 | 0.811 | 0.337 | 24.56 (11k) |
+
+| step | 1k | 2k | 3k | 5k | 10k | 15k | 20k |
+|---|---|---|---|---|---|---|---|
+| sky | 22.07 | 23.05 | 23.65 | 24.32 | 24.84 | 24.82 | 24.95 |
+| no sky | 20.78 | 21.91 | 23.17 | 23.95 | 24.37 | 24.52 | 24.49 |
+
+- **The sky helps: +0.47 dB / +0.009 SSIM / −0.013 LPIPS at 20k**, ahead at
+  every eval, largest early (+1.3 dB at 1k, +1.1 at 2k). No-sky flattens after
+  ~11k and drifts down slightly; sky keeps creeping up to the end.
+- Sky use at the end: ~26k of ~644k points per step after culling are sky;
+  sky opacity mean 0.03 (scene 0.08), scale mean 0.18 — few, large, faint
+  Gaussians, i.e. the network uses them as a soft background.
+- Caveat: r = 5.418 came from the training subset after the outlier filter,
+  not from all valid points the sphere was built from (r = 5.923), so the
+  farthest sky points reach |p| ≈ 1.09 (slight Fourier wrap). Fixed for 021.
+
+---
+
+## 2026-10-23 · 021 — complexity-based point selection (bonsai, quantile rule)
+
+**Change.** The 1M scene points of 020-sky drawn by image complexity instead of
+uniformly; sky points all kept.
+
+- **Complexity per point** (`scripts/021_complexity_maps.py` + `edgs_extract_ref.py
+  --complexity_dir`): delentropy maps (imgvibecheck, kernel 32, stride 4, "same" padding,
+  float32 TIFF, `datasets/mipnerf/<scene>/delentropy_k32s4_<factor>/`), sampled at each
+  row's reference pixel (points and sky). Extraction to `experiments/edgs_feat_sky_cplx/`
+  (jobs 857 + 858; PLY byte-identical to `edgs_feat_sky`, the extraction is
+  deterministic). Delentropy saturates at 5.0 with 32 x 32 windows (log2(1024) / 2):
+  bonsai median 4.62, p1 3.46, p99 4.99.
+- **Selection rule** (`input.subset=quantile`, designed in `$WORK/viewers/complexity`,
+  after `docs/claude_complexity_distrib.pdf` fig. 2): complexity -> rank q in [0, 1];
+  keys = beta q + Gumbel; floor: in each of 50 equal-width complexity bins the
+  min(100, available) top-key points; of the rest of the 1M, 5 % uniform and 95 % the
+  largest keys (= without replacement with probability ~ exp(4 q)). Bonsai: rate per
+  complexity decile (x uniform) 0.17 0.23 0.30 0.42 0.58 0.81 1.13 1.56 2.09 2.71; median
+  complexity of the chosen points 4.939 vs 4.627 (training log = viewer).
+- Discarded on the way: min-max weights exp(rho) (koalags, `input.subset=complexity`):
+  the saturation + ~0 outliers squeeze rho into ~0.9-1 (p99 / p1 weight 1.1-1.4x); with a
+  p1-p99 clip 2.7x but per-point weighting follows the histogram (fig. 1 behaviour at small
+  budgets); per-bin quotas: steps / dips at the saturated bin. Job 871 / 872 (clip
+  variant) cancelled before the first eval.
+
+Setup: `scripts/021_train_bonsai_complexity.sh` with `SUBSET=quantile`
+(+ `jobs/ffgsplat_021.slurm`), otherwise 020-sky (sky + is_sky flag, 019c settings,
+20k steps, 8 views / step, 3g.71gb). Job 935, wandb `tnghdtvw`.
+
+Caveat for the comparison with 020-sky (no matched random run, by choice): the PE radius
+differs too. 021 uses r = |mu| + 4 sigma of all valid scene points = 0.545 + 4 x 1.345 =
+**5.923** (the set the sky sphere was built from: sky at |p| <= 1); 020 used 5.418 from its
+subset after the trainer's far-outlier filter (sigma is sensitive to those few points), so
+in 020-sky the farthest sky points reach |p| ~ 1.09.
+
+**Results** (bonsai test views, 37 images; job 935, 5 h 18 min):
+
+| run | PSNR @20k | SSIM | LPIPS | best PSNR (step) |
+|---|---|---|---|---|
+| 020-sky (uniform 1M, r 5.418) | **24.95** | **0.820** | **0.324** | 24.97 (18k) |
+| 021-quant (complexity 1M, r 5.923) | 24.56 | 0.816 | 0.335 | 24.81 (15k) |
+| 020-nosky | 24.49 | 0.811 | 0.337 | 24.56 (11k) |
+
+| step | 1k | 2k | 3k | 5k | 10k | 15k | 20k |
+|---|---|---|---|---|---|---|---|
+| 020-sky | 22.07 | 23.05 | 23.65 | 24.32 | 24.84 | 24.82 | 24.95 |
+| 021-quant | 21.70 | 22.69 | 23.33 | 24.00 | 24.68 | 24.81 | 24.56 |
+
+- **No gain from the complexity selection here: −0.39 dB vs 020-sky at 20k**
+  (−0.2 to −0.4 at almost every eval; only at 15k level). It plateaus at ~24.7
+  from 10k and is noisier late (24.56–24.81); final SSIM / LPIPS between
+  020-sky and no-sky.
+- Sky use similar to 020-sky (~25.5k sky points per step, scale mean 0.18),
+  sky opacity a bit higher (0.049 vs 0.030); more points survive the cull
+  (~776k vs ~644k per step at the last step; not investigated).
+- Not separable from the PE-radius change (5.923 vs 5.418): a matched run
+  (uniform subset on `edgs_feat_sky_cplx` with r = 5.923) would tell which one
+  costs the 0.4 dB. Not run.
+
+---
+
+## 2026-10-23 · 022 — sky sphere on DL3DV (10 scenes, 3 unseen)
+
+**Change.** 020's sky sphere in the DL3DV trainer (`core/trainer_dl3dv.py`, all
+defaults unchanged for 019): with `input.sky`, every sky point of the scene goes
+into every forward on top of the `points_bounded / unbounded` scene points (frustum
+culled the same way), flag = last feature channel; `input.pos_radius=sigma`: fixed
+r = |mu| + 4 sigma of all valid scene points (as 021). New `dl3dv.eval_unseen_limit`
+(first N of the 13 eval_unseen scenes).
+
+Setup: `scripts/022_train_dl3dv_sky.sh` (+ `jobs/ffgsplat_022.slurm`) = 019c's R4
+(train on the 10 eval_seen scenes, 5 bounded / 5 unbounded, 500k points, grad accum
+4, kNN views, cull subset 5 %, 10k steps, eval every 500) + sky + 4 sigma PE; points
+from `edgs_feat_dl3dv_sky_cplx` (job 874; complexity not used, uniform subset);
+eval_unseen = 07d9f972, 0a1b7c20, 26fd2335. 1 x full H200 (memory fraction 0.9).
+Job 1011, wandb `5lv2mflh`. Sky-only (no matched no-sky run, by choice); R4 is the
+nearest reference but differs in the PE radius (r95 there).
+
+Smoke test (job 1010, `jobs/ffgsplat_022_smoke.slurm`, 3g.71gb):
+`scripts/022_check_sky.py` on the 13 scenes: 60k–152k sky points per scene, **none
+removed by the outlier filter** (sky extent 6–37 % of the 86-unit limit), sky max |p|
+<= 1.000 everywhere (r 5.0–32.1), flag correct. 100 steps: ~430k points per step after
+culling (~46k sky), sky opacity 0.10 → 0.20, 4.2 s/step, peak 63 GB allocated on the
+slice (R4: 46) → moved to a full H200: 1.9 s/step, 35 GB allocated / 58 reserved
+(first 20 steps), ~5.5 h for 10k + evals.
+
+**Results** (step 10k; job 1011, 6 h 36 min on a full H200, ~1.9–2.2 s/step, 64 GB
+reserved). R4 = 019c R4 at 10k; its unseen number recomputed over the same 3 scenes:
+
+| run | eval_seen (10) | bounded / unbounded PSNR | eval_unseen (3) |
+|---|---|---|---|
+| 019c R4 (no sky, r95 PE) | 19.88 / 0.673 / 0.389 | 20.37 / 19.39 | 17.79 / 0.638 / 0.445 |
+| 022 (sky, 4 sigma PE) | **21.39 / 0.699 / 0.363** | 21.52 / 21.26 | **18.09 / 0.638 / 0.439** |
+
+Seen PSNR per scene (R4 → 022): 032dee9f 21.13 → 22.32, 165f5af8 20.20 → 20.72,
+1de58be5 20.35 → 23.56, 2beaca31 20.16 → 21.26, 3bb3bb4d 22.12 → 22.79, 9fb0588f 19.84 →
+20.99, a401469c 20.65 → 20.88, d904ae29 18.68 → 19.27, e78f8ceb 18.57 → 19.07, ff592398
+17.08 → 22.99. Unseen: 07d9f972 19.65 → 20.18, 0a1b7c20 19.00 → 18.98, 26fd2335 14.73 → 15.11.
+
+- **Seen +1.51 dB**, better on all 10 scenes; +1.02 without ff592398 (R4's 17.08 there
+  is an outlier, R3 had 19.45). Also +0.96 over R3 (20.42). Unbounded gains more
+  (+1.87) than bounded (+1.15), as expected from a sky.
+- **Unseen +0.30 dB**, LPIPS −0.006, SSIM equal; 3 scenes only, within noise. Flat
+  from step 500 (18.0 → 18.1, best 18.38 at 6.5k) while seen keeps rising: the same
+  10-training-scenes pattern as 019c. 26fd2335 (unbounded) stays bad (15.1).
+- Seen still rising slowly at 10k (21.38 at 9k), plateauing.
+- Sky use at the end: ~39–45k of ~390–450k points per step are sky, sky opacity
+  ~0.08–0.09 (scene ~0.08–0.14), sky scale ~0.22–0.25: denser use than on bonsai.
+- Not separable from the PE change (4 sigma vs r95), and no no-sky run with the same r.
+
+**Full run (120 scenes).** 022 (sky + 4 sigma PE) with the 019c full setup (job 833):
+train split, 1M / 1.25M points, 2 x full H200 x grad accum 4 = 64 views per update,
+LR 4e-4, 60k steps, eval every 2000 on the 10 eval_seen + all 13 eval_unseen; 96 CPUs,
+700G, CUDA memory fraction 0.9. Submitted 2026-10-23 as jobs 1016 + 1017 (chained,
+`RESUME=latest`; env overrides on `jobs/ffgsplat_022.slurm`). Baseline 833 at 60k:
+seen 19.64 / 0.680 / 0.382, unseen (13) 18.11 / 0.632 / 0.421. Results: pending.
+
+---
+
+## 2026-10-23 · 023 — effective receptive field (for the chunk overlap; no training)
+
+`scripts/023_receptive_field.py` (job 1012, `jobs/ffgsplat_023_rf.slurm`): for 32
+random scene points (+ 8 sky points) per scene, the gradient of one random projection
+of the point's predicted Gaussian w.r.t. every input point's features (query itself
+excluded); C(d) = share of that influence from points within d (~ what a chunk face
+with overlap d cuts away, to first order). 4 eval_seen scenes (1de58be5, 2beaca31
+bounded; 032dee9f, 9fb0588f unbounded), their fixed eval subsets. Normalized frame
+(voxel 0.005). JSON in `results/023_rf_{022,019c}.json`.
+
+Share of the influence within d (median over the 32 scene-point queries):
+
+| ckpt | scene | 0.025 (5 vox) | 0.1 (20 vox) | 0.32 | 0.64 | 1.28 | 2.56 | 95 % radius |
+|---|---|---|---|---|---|---|---|---|
+| 019c full, step 50k (1M / 1.25M) | 1de58be5 | 4 % | 7 % | 22 % | 53 % | 85 % | 99 % | 1.90 |
+| | 2beaca31 | 25 % | 29 % | 40 % | 63 % | 90 % | 99 % | 1.60 |
+| | 032dee9f | 29 % | 32 % | 42 % | 67 % | 91 % | 99 % | 1.63 |
+| | 9fb0588f | 33 % | 38 % | 48 % | 66 % | 88 % | 98 % | 1.72 |
+| 022, step 2k (500k + sky) | 1de58be5 | 2 % | 19 % | 42 % | 80 % | 95 % | 100 % | 1.31 |
+| | 2beaca31 | 57 % | 68 % | 78 % | 90 % | 97 % | 100 % | 0.89 |
+| | 032dee9f | 39 % | 46 % | 57 % | 89 % | 98 % | 100 % | 0.93 |
+| | 9fb0588f | 72 % | 81 % | 88 % | 94 % | 99 % | 100 % | 0.73 |
+
+- The trained model (019c) is **far from local**: the attention stages (3–4) bring
+  most of the influence from 0.3–1.5 away; within 20 voxels only 7–38 %. The early
+  022 checkpoint is more local (less trained: the far context is learned).
+- Per point the influence falls ~100× from 0.01 to 0.1 and again ~10–100× by 1.28,
+  but there are many more far points, so the far field adds up.
+- Sky points take their influence from far (50 % only at 1.5–2.8): sparse
+  neighbourhoods, the windows of 1024 points span large distances.
+- For chunking an existing checkpoint, an overlap that keeps 90 % of the influence
+  would be ~1.3 (256 voxels), i.e. cells of the scene's size: exact chunked inference
+  is not affordable for 019c. First-order only; the real effect is measured by
+  `scripts/023_chunk_eval.py` (chunked vs full renders, `jobs/ffgsplat_023_chunk.slurm`).
+
+---
+
+## 2026-10-24 · 024 — EDGS v2: RoMa matching + features at the image resolution (bonsai)
+
+**Change.** Re-extraction of bonsai (images_2, 1559 x 1039) with new opt-in flags of
+`edgs_extract_ref.py` (defaults = the old extraction), motivated by the 2D comparison in
+`$WORK/viewers/roma_res` / the "Potential feature problems in RoMa" section of the 200 doc:
+
+- matching: RoMa coarse at **560 x 840** (`--roma_coarse aspect`, 3:2 instead of a squashed
+  560 x 560) + RoMa's **refinement pass at 1040 x 1560** (`--roma_refine native`; EDGS used the
+  560 x 560 flow, bilinearly resized);
+- features: VGG roma1/2/4 on the **native image** (`--feat_native`), DINOv2 at the native aspect
+  (1036 x 1554, pos embed interpolated) with **patch stride 7** (`--dino_stride 7`): 147 x 221
+  tokens instead of 40 x 40;
+- new PCA basis `experiments/edgs_feat/pca/mipnerf7_native_s7_basis.npz` (7 Mip-NeRF scenes x 60
+  training images, same 8/16/32/48 dims), job 1020;
+- extraction `experiments/edgs_feat_sky_cplx_v2/bonsai` (job 1021, 468 s vs 265 s): 4,615,802
+  valid of 4,620,257 (old: 4,601,358 of 4,618,184): **3.8x fewer points rejected** by the
+  reprojection tolerance (4.5k vs 16.8k); uv colour check 0.017 (old 0.011, limit 0.05).
+
+Training: `scripts/021_train_bonsai_complexity.sh` with `SUBSET=random` (uniform 1M + all sky =
+020-sky's setup, 20k steps, 3g.71gb), only `input.edgs_dir` changed; job 1022, wandb `4vmz5m1n`.
+Reprojection median 0.43 px (020/021: 0.51). PE radius |mu| + 4 sigma = **5.472** (sigma 1.229
+vs 1.345 on the old points: fewer far outliers), i.e. close to 020-sky's 5.418, so the comparison
+with 020-sky (24.95 dB) is nearly matched in r. ~0.85 s/step.
+
+**Results** (finished 2026-10-24 05:40 UTC, 37 test views, step 19999):
+
+| bonsai 20k | PSNR | SSIM | LPIPS | best PSNR |
+|---|---|---|---|---|
+| 020-sky (old features, job 855, `su3k9soz`) | 24.95 | 0.820 | 0.324 | 24.97 @ 18k |
+| **024 (v2)** | **25.07** | **0.837** | **0.306** | 25.08 @ 18k |
+
+- SSIM +0.010…+0.018 and LPIPS −0.012…−0.022 at **every** eval (1k–20k): consistent gain in
+  structure / perceptual quality.
+- PSNR level: −0.17…+0.19 dB through the run, +0.11 at the end; behind mid-run (5k–12k), ahead
+  from 13k on.
+- One scene, one seed; the test at scale is the DL3DV v2 extraction (job 1127, trim 0.75 % sigma).
+- Added to the 200 doc (roma-res section, "Result: bonsai with v2 features", `RUN_DATA.romav2`).
+
+---
+
+## 2026-10-24 · 025 — EDGS v2 on DL3DV (10 scenes, 3 unseen) vs 022
+
+**Change.** Same as 022 (job 1011: R4 setup + sky 4σ, PE radius |mu| + 4σ, 10k steps, one
+full H200), only the input:
+
+- extraction `experiments/edgs_feat_dl3dv_sky_cplx_v2_trim` (job 1127, all 133 scenes, ~272 s
+  each, 271 GB): RoMa coarse 560 x 994 (native aspect, no refine pass), VGG on the native
+  960 x 540 image, DINO at the native aspect with stride 7, PCA `dl3dv140_native_s7_basis.npz`;
+- sky sigma **trimmed** (`--sky_sigma_mode trim --sky_trim 0.0075`: drop the 0.75 % farthest
+  from the per-axis median, then mean / std). The plain std blew up on far mis-triangulations
+  (v2-std 165f5af8: PE radius 91, run 1079 cancelled); MAD was too tight (15–37 % outside on
+  Mip-NeRF outdoor), trim 1 % 2.3–4.7 % outside. Over the 133 scenes: sigma 0.12–0.87x the old
+  one (median 0.58), points outside the sphere median 4.2 % (old 1.2 %), max 7.9 % (ff592398);
+  colour check median 0.024 (old 0.015), 4 scenes > 0.045 (c37109a5 0.051);
+- `input.sigma_from=sky`: PE mu / sigma from the stored sphere (new option in
+  `data/edgs_points.py`), so r = the sphere's radius in the training frame.
+
+PE radii 4.20–7.94 (022: 5.00–32.06; 26fd2335 32.06 → 7.94, 032dee9f 16.08 → 7.49). Sky points
+117k per seen scene on average (022: 105k). Job 1261, wandb `miw6hbr3`, ~1.7–2.2 s/step,
+~58 GB reserved early on.
+
+**Results** (finished 2026-10-24 20:44 UTC, 6 h 31 min), step 9999, PSNR / SSIM / LPIPS:
+
+| | eval_seen (10) | eval_unseen (3) |
+|---|---|---|
+| 022 (1011) | 21.39 / 0.699 / 0.363 | 18.09 / 0.638 / 0.439 |
+| **025** | 21.38 / 0.700 / 0.360 | **18.84** / 0.647 / 0.431 |
+
+- Seen: a tie (−0.01 dB, SSIM / LPIPS marginally better); per scene −0.21…+0.26 dB, no pattern
+  by bounded / unbounded. The bonsai v2 gain in SSIM / LPIPS (+0.017 / −0.018) does not show
+  up on DL3DV at 960 x 540.
+- Unseen +0.75 dB comes **entirely from 26fd2335**: 15.11 → 17.43 (+2.33 dB, LPIPS 0.604 → 0.566),
+  the scene whose PE radius was 32.06 with the old sigma and is 7.94 now. 07d9f972 −0.04,
+  0a1b7c20 −0.05. So the gain is most likely the robust sigma (PE scale), not the features.
+- 025 is ahead on unseen from the first eval (19.0 vs 18.0 at 500 steps), again from 26fd2335.
+- Next to separate the two: old features + trimmed sigma (needs a re-extraction of the sky /
+  sigma only, or a sigma override computed from the old points).
+
+---
+
+## 2026-10-24 · 026 — wider backbone + decoder blocks (10 scenes, 30k steps)
+
+**Finding.** The decoder never had blocks: `ModelConfig.dec_depths` stayed at LitePT's
+`(0, 0, 0, 0)` since the scaffold (a45d6fd), so `dec_conv=True` did nothing and every
+decoder stage was `Linear(coarse) + Linear(skip)` (+ norm / act). The finest stages were also
+narrow (36 / 72 ch, stem 91 → 36). All runs underfit (025: train PSNR ~21.1 vs seen eval
+21.4; 1016: ~19.3 vs 20.0), and the v2 features tied with the old ones in 025.
+
+**Change** (overrides on 025's command, same data: v2_trim + `input.sigma_from=sky`):
+`input.feature_mlp_dim` 64 → 128 (stem input 155), `model.enc_channels` (64, 128, 192, 384,
+504), `model.enc_num_head` (4, 8, 12, 16, 21) (head dim 24: LitePT's 3D RoPE needs a multiple
+of 6; 384 / 12 crashed, smoke job 1262), `model.dec_depths` (1, 1, 1, 1) conv blocks,
+`model.dec_channels` (128, 128, 192, 384), `model.dec_num_head` (4, 4, 8, 16), `head.skip_dim`
+128 (`hidden_dim` 128). 17.9M Muon + 10.3M AdamW params (025: 11.2M + 1.95M). Smoke (job 1263,
+60 steps + eval): ~91 GB reserved, ~3.4 s/step (025: ~58 GB, ~2.1 s).
+**30k steps** (`NUM_STEPS=30000`; LR schedule stretched over 30k, so its 10k point is not
+directly comparable to 025's end), eval every 500, one full H200, 48 h limit; job 1264,
+wandb `vkzauv9t`.
+
+**Results: running** (started 2026-10-24 ~21:25 UTC, ETA ~31 h).
 
 ---
 
