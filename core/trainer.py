@@ -789,6 +789,9 @@ class Trainer:
                 flag = edgs["is_sky"].astype(np.float32)[:, None]
                 image_feat = flag if image_feat is None else np.concatenate([image_feat, flag], 1)
             print(f"[{name}] sky points: {info['num_sky']}")
+            if "complexity_median_used" in info:
+                print(f"[{name}] subset {info['subset']}: median complexity {info['complexity_median_used']:.3f} "
+                      f"(all valid scene points {info['complexity_median_all']:.3f})")
             print(
                 f"[{name}] EDGS points from {edgs_dir}: {info['num_used']} used of "
                 f"{info['num_valid']} valid / {info['num_total']}; reprojection into the "

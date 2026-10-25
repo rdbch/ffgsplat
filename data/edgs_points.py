@@ -51,6 +51,27 @@ class InputConfig:
     sky: bool = False
     # Seed of the `max_points` subset (independent of the training RNG).
     seed: int = 0
+    # How the `max_points` subset of the scene points is drawn: "random" (uniform) or
+    # "complexity" (features.npz's `complexity`, from `edgs_extract_ref.py
+    # --complexity_dir`): `subset_random_frac` of it uniform, the rest without
+    # replacement with weights exp(complexity_beta * rho), rho = the complexity
+    # clipped to its [complexity_clip, 100 - complexity_clip] percentiles over the
+    # scene's points, then min-max normalized to [0, 1] (KoalaGS's weighting + the
+    # clip: delentropy saturates at 5.0 with 32 x 32 windows and a few ~0 outliers
+    # would squeeze everything else into rho ~ 0.9-1). Sky points are never subsampled.
+    # "quantile": the complexity becomes its rank q in [0, 1] over the scene points;
+    # first a floor: in each of `complexity_bins` equal-width bins over [min, max]
+    # complexity, the min(complexity_floor, available) points with the highest keys
+    # beta * q + Gumbel; then of the rest of the budget, `subset_random_frac` uniform and
+    # the others the largest keys among the remaining points (= drawing without replacement
+    # with probability ~ exp(complexity_beta * q)). If the floors alone exceed the budget,
+    # the floors win (more points than `max_points`).
+    subset: str = "random"
+    subset_random_frac: float = 0.2
+    complexity_beta: float = 1.0
+    complexity_clip: float = 1.0
+    complexity_bins: int = 50
+    complexity_floor: int = 100
     # Feature blocks go through an MLP before LitePT: standardize -> Linear(D, dim)
     # -> GELU -> ... -> Linear(dim, dim), concatenated with rgb. Number of Linear layers.
     feature_mlp_dim: int = 64
@@ -113,6 +134,55 @@ def validate_input_config(cfg: InputConfig) -> None:
                          f"got {cfg.pos_freqs}, {cfg.pos_percentile}")
 
 
+def complexity_subset(complexity: np.ndarray, n: int, random_frac: float, beta: float,
+                      rng: np.random.Generator, clip: float = 0.0) -> np.ndarray:
+    """Sorted indices of `n` of the rows of `complexity`: n - round(random_frac * n) drawn
+    without replacement with weights exp(beta * rho) (rho = complexity clipped to its
+    [clip, 100 - clip] percentiles, then min-max normalized; Gumbel top-k), then the rest
+    uniformly from the rows not drawn yet."""
+    c = complexity.astype(np.float64)
+    if clip > 0:
+        c = np.clip(c, *np.percentile(c, [clip, 100.0 - clip]))
+    rho = (c - c.min()) / (c.max() - c.min() + 1e-12)
+    n_weighted = n - int(round(random_frac * n))
+    keys = beta * rho + rng.gumbel(size=len(c))             # log weight + Gumbel noise
+    weighted = np.argpartition(-keys, n_weighted - 1)[:n_weighted] if n_weighted > 0 else np.empty(0, int)
+    rest = np.setdiff1d(np.arange(len(c)), weighted, assume_unique=True)
+    uniform = rng.choice(rest, size=n - n_weighted, replace=False)
+    return np.sort(np.concatenate([weighted, uniform]))
+
+
+def quantile_subset(complexity: np.ndarray, n: int, random_frac: float, beta: float, bins: int,
+                    floor: int, rng: np.random.Generator) -> np.ndarray:
+    """Sorted indices of the rows of `complexity` chosen by the quantile rule (see
+    InputConfig.subset): rank q, keys beta * q + Gumbel, a floor of the top-key points per
+    equal-width complexity bin, then (1 - random_frac) of the remaining budget by largest key
+    and random_frac uniformly among the rest."""
+    c = complexity.astype(np.float64)
+    m = len(c)
+    q = np.empty(m)
+    q[np.argsort(c, kind="stable")] = np.arange(m) / max(1, m - 1)
+    keys = beta * q + rng.gumbel(size=m)
+    lo, hi = c.min(), c.max()
+    b = np.minimum(((c - lo) / (max(hi - lo, 1e-12) / bins)).astype(np.int64), bins - 1)
+    # Floor: rank within the bin by descending key, keep the first `floor`.
+    order = np.lexsort((-keys, b))
+    first = np.searchsorted(b[order], np.arange(bins))
+    within = np.arange(m) - first[b[order]]
+    floor_rows = order[within < floor]
+    free = np.ones(m, dtype=bool)
+    free[floor_rows] = False
+    rem = max(0, n - len(floor_rows))
+    n_weighted = rem - int(round(random_frac * rem))
+    free_rows = np.flatnonzero(free)
+    weighted = (free_rows[np.argpartition(-keys[free_rows], n_weighted - 1)[:n_weighted]]
+                if n_weighted > 0 else np.empty(0, np.int64))
+    free[weighted] = False
+    rest = np.flatnonzero(free)
+    uniform = rng.choice(rest, size=min(rem - n_weighted, len(rest)), replace=False)
+    return np.sort(np.concatenate([floor_rows, weighted, uniform]))
+
+
 def feature_layout(cfg: InputConfig) -> Tuple[int, List[str]]:
     """(number of direct channels = 3 if rgb else 0, feature blocks in input order)."""
     return (3 if "rgb" in cfg.features else 0), [b for b in FEATURE_BLOCKS if b in cfg.features]
@@ -165,9 +235,22 @@ def load_edgs_points(cfg: InputConfig, scene_dir: str, parser, train_indices) ->
         raise ValueError(f"{scene_dir}: input.sky=true but features.npz has no sky points")
     sky_rows = rows[is_sky_all[rows]]
     rows = rows[~is_sky_all[rows]]
+    if cfg.subset not in ("random", "complexity", "quantile"):
+        raise ValueError(f"input.subset must be random, complexity or quantile, got {cfg.subset!r}")
+    if cfg.subset != "random" and "complexity" not in npz.files:
+        raise ValueError(f"{scene_dir}: input.subset={cfg.subset} but features.npz has no complexity "
+                         f"(edgs_extract_ref.py --complexity_dir)")
     if cfg.max_points is not None and len(rows) > cfg.max_points:
         rng = np.random.default_rng(cfg.seed)
-        rows = np.sort(rng.choice(rows, size=cfg.max_points, replace=False))
+        if cfg.subset == "random":
+            rows = np.sort(rng.choice(rows, size=cfg.max_points, replace=False))
+        elif cfg.subset == "quantile":
+            rows = rows[quantile_subset(npz["complexity"][rows], cfg.max_points, cfg.subset_random_frac,
+                                        cfg.complexity_beta, cfg.complexity_bins, cfg.complexity_floor, rng)]
+        else:
+            rows = rows[complexity_subset(npz["complexity"][rows], cfg.max_points,
+                                          cfg.subset_random_frac, cfg.complexity_beta, rng,
+                                          clip=cfg.complexity_clip)]
     num_scene = len(rows)
     if cfg.sky:
         rows = np.concatenate([rows, sky_rows])          # sky rows last
@@ -217,11 +300,21 @@ def load_edgs_points(cfg: InputConfig, scene_dir: str, parser, train_indices) ->
         ref = features[:num_scene]
         features = (features - ref.mean(0)) / (ref.std(0) + 1e-6)
 
+    if "complexity" in npz.files:
+        # Median complexity of all valid scene points vs the ones used (the subset's bias).
+        cplx = npz["complexity"]
+        scene_valid = np.flatnonzero(valid & ~is_sky_all) if cfg.drop_invalid else np.flatnonzero(~is_sky_all)
+        cplx_info = {"complexity_median_all": float(np.median(cplx[scene_valid])),
+                     "complexity_median_used": float(np.median(cplx[rows[:num_scene]]))}
+    else:
+        cplx_info = {}
     info = {
+        **cplx_info,
         "num_total": int(len(valid)),
         "num_valid": int(valid.sum()),
         "num_used": int(len(rows)),
         "num_sky": int(is_sky.sum()),
+        "subset": cfg.subset,
         "align_median_px": align_px,
         "align_p90_px": float(np.percentile(errors, 90)),
         "pca_basis_sha1": meta.get("pca_basis_sha1"),

@@ -21,6 +21,8 @@ Output:
         valid    (N,)    bool     passed the reprojection test (False rows have zero
                                   opacity in the PLY)
         is_sky   (N,)    bool     only with --sky: True for the sky rows (appended last)
+        complexity (N,)  float32  only with --complexity_dir: the image complexity map of
+                                  the row's reference view sampled at ref_uv
     features_meta.json                        block spans, basis path + hash, camera
                                               names, settings, sanity checks ("sky" entry
                                               with --sky)
@@ -39,6 +41,10 @@ greedy set cover picks the minimum set of views seeing the rest, and each sky po
 reference view is the chosen view where it's most central. rgb + features are sampled
 there exactly as for the points (occlusion ignored). PLY rows: rgb as f_dc, scale g / 2,
 identity rotation, the median opacity of the valid points.
+
+--complexity_dir (maps from ffgsplat's scripts/021_complexity_maps.py) adds a fourth step
+(`add_complexity`): every row, points and sky alike, gets the complexity of its reference
+view at ref_uv (bilinear, with the maps' window-centre convention from their meta.json).
 """
 
 import argparse
@@ -58,6 +64,7 @@ for _p in (REPO_ROOT,
         sys.path.insert(0, _p)
 
 import numpy as np  # noqa: E402
+import tifffile  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from tqdm import tqdm  # noqa: E402
@@ -120,6 +127,11 @@ def parse_args(argv=None):
     sky.add_argument("--sky_sigma_k", type=float, default=4.0, help="Sphere radius in sigmas.")
     sky.add_argument("--sky_points", type=int, default=200_000, help="Lattice points before culling.")
     sky.add_argument("--sky_points_per_voxel", type=float, default=4.0)
+
+    cx = p.add_argument_group("complexity (fourth step, see the module docstring)")
+    cx.add_argument("--complexity_dir", default=None,
+                    help="Folder of per-image complexity maps (<stem>.tif + meta.json), "
+                         "absolute or relative to --source_path.")
 
     misc = p.add_argument_group("misc")
     misc.add_argument("--seed", type=int, default=228)
@@ -363,6 +375,43 @@ def add_sky_points(gaussians, record, cameras, extractor, pca, args, device):
     }
 
 
+def add_complexity(record, cameras, args):
+    """Fourth step (--complexity_dir): record["complexity"] = each row's reference-view
+    complexity map sampled (bilinearly) at its ref_uv. Returns the meta's entry."""
+    d = args.complexity_dir if os.path.isabs(args.complexity_dir) else os.path.join(args.source_path, args.complexity_dir)
+    with open(os.path.join(d, "meta.json")) as f:
+        cmeta = json.load(f)
+    s, k = cmeta["stride"], cmeta["kernel_size"]
+    c0 = 1.0 - (k % 2) / 2.0                     # entry j's window centre: x = s * j + c0
+    ref_cam, ref_uv = record["ref_cam"], record["ref_uv"]
+    out = np.full(len(ref_cam), np.nan, dtype=np.float32)
+    for cam_idx in np.unique(ref_cam):
+        rows = np.flatnonzero(ref_cam == cam_idx)
+        stem = os.path.splitext(cameras[cam_idx].image_name)[0]
+        cmap = tifffile.imread(os.path.join(d, stem + ".tif"))
+        h, w = cmeta["sizes"][stem]
+        assert cmap.shape == ((h - 1) // s + 1, (w - 1) // s + 1), (stem, cmap.shape, h, w)
+        # [-1, 1] (edges) -> continuous pixels -> fractional map indices.
+        jx = np.clip(((ref_uv[rows, 0] + 1) * 0.5 * w - c0) / s, 0, cmap.shape[1] - 1)
+        jy = np.clip(((ref_uv[rows, 1] + 1) * 0.5 * h - c0) / s, 0, cmap.shape[0] - 1)
+        x0, y0 = np.floor(jx).astype(int), np.floor(jy).astype(int)
+        x1, y1 = np.minimum(x0 + 1, cmap.shape[1] - 1), np.minimum(y0 + 1, cmap.shape[0] - 1)
+        fx, fy = jx - x0, jy - y0
+        out[rows] = ((1 - fy) * ((1 - fx) * cmap[y0, x0] + fx * cmap[y0, x1])
+                     + fy * ((1 - fx) * cmap[y1, x0] + fx * cmap[y1, x1]))
+    assert not np.isnan(out).any()
+    record["complexity"] = out
+    q = np.percentile(out, [0, 1, 50, 99, 100]).tolist()
+    print(f"      complexity ({cmeta['metric']}, k {k}, stride {s}): min {q[0]:.3f}, p1 {q[1]:.3f}, "
+          f"median {q[2]:.3f}, p99 {q[3]:.3f}, max {q[4]:.3f}")
+    entry = {"dir": os.path.abspath(d), "metric": cmeta["metric"], "kernel_size": k, "stride": s,
+             "min": q[0], "p1": q[1], "median": q[2], "p99": q[3], "max": q[4]}
+    if "is_sky" in record:
+        sky = record["is_sky"]
+        entry["median_points"], entry["median_sky"] = float(np.median(out[~sky])), float(np.median(out[sky]))
+    return entry
+
+
 def sha1(path):
     h = hashlib.sha1()
     with open(path, "rb") as f:
@@ -429,6 +478,11 @@ def main(argv=None):
         print("[4b/5] Sky points")
         sky_meta = add_sky_points(gaussians, record, cameras, extractor, pca, args, device)
 
+    complexity_meta = None
+    if args.complexity_dir:
+        print("[4c/5] Complexity")
+        complexity_meta = add_complexity(record, cameras, args)
+
     n_final = int(gaussians._xyz.shape[0])
     assert record["feat"].shape[0] == n_final, (record["feat"].shape, n_final)
     assert np.allclose(record["xyz"], gaussians._xyz.detach().cpu().numpy(), atol=1e-5), \
@@ -466,6 +520,8 @@ def main(argv=None):
     }
     if sky_meta is not None:
         meta["sky"] = sky_meta
+    if complexity_meta is not None:
+        meta["complexity"] = complexity_meta
     feat_path = os.path.join(out_dir, "features.npz")
     np.savez(feat_path, **record)
     with open(os.path.join(out_dir, "features_meta.json"), "w") as f:
