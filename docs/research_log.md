@@ -570,7 +570,27 @@ train split, 1M / 1.25M points, 2 x full H200 x grad accum 4 = 64 views per upda
 LR 4e-4, 60k steps, eval every 2000 on the 10 eval_seen + all 13 eval_unseen; 96 CPUs,
 700G, CUDA memory fraction 0.9. Submitted 2026-10-23 as jobs 1016 + 1017 (chained,
 `RESUME=latest`; env overrides on `jobs/ffgsplat_022.slurm`). Baseline 833 at 60k:
-seen 19.64 / 0.680 / 0.382, unseen (13) 18.11 / 0.632 / 0.421. Results: pending.
+seen 19.64 / 0.680 / 0.382, unseen (13) 18.11 / 0.632 / 0.421.
+
+**Results** (job 1016 reached 60k: 2 d 12 h, ~3.4 s/step, peak 100 GB allocated / 103 GB
+reserved per GPU; 1017 only resumed at step 59999 and exited; wandb `uu1pmhjd`), step 59999,
+PSNR / SSIM / LPIPS:
+
+| | eval_seen (10) | eval_unseen (13) | bounded / unbounded unseen PSNR |
+|---|---|---|---|
+| 833 (019c full, no sky, r95 PE) | 19.64 / 0.680 / 0.382 | 18.11 / 0.632 / 0.421 | |
+| **022 full** | **20.59 / 0.691 / 0.372** | **19.03 / 0.641 / 0.412** | 19.20 / 18.84 |
+
+- **+0.95 dB seen, +0.92 dB unseen** over 833: the sky + 4 sigma PE gain carries over to the
+  full data and, unlike on 10 scenes, also to unseen scenes.
+- Unseen plateaus early: 18.93 at 10k, 19.02 at 22k, 19.03 at 60k (oscillating ±0.15 in
+  between, mostly unbounded scenes). Seen still creeping up at the end (+0.02 dB / 4k steps).
+- Still underfits: train PSNR ~19.7 (last 10k steps) vs seen eval 20.6.
+- Unseen per scene: 07d9f972 20.76, 0a1b7c20 21.05, 26fd2335 18.43, 2f3e1c0f 18.21,
+  3b7529dc 19.70, 3bb894d1 19.57, 5c3af581 17.91, 6d81c5ab 14.93, 7a9f9766 19.67, ba55c875
+  21.45, d3af8212 21.07, dafa9c7c 15.66, ef59aac4 18.98. Worst: 6d81c5ab and dafa9c7c (SSIM 0.33).
+- On the 3-scene unseen subset used by the 10-scene runs: **20.08** (025: 18.84, 026: 18.93;
+  see 026).
 
 ---
 
@@ -710,7 +730,54 @@ of 6; 384 / 12 crashed, smoke job 1262), `model.dec_depths` (1, 1, 1, 1) conv bl
 directly comparable to 025's end), eval every 500, one full H200, 48 h limit; job 1264,
 wandb `vkzauv9t`.
 
-**Results: running** (started 2026-10-24 ~21:25 UTC, ETA ~31 h).
+**Results** (finished 2026-10-26 04:48 UTC, 31 h 25 min, ~3.5 s/step, peak 91 GB allocated /
+94 GB reserved), PSNR / SSIM / LPIPS:
+
+| | eval_seen (10) | eval_unseen (3) |
+|---|---|---|
+| 025, 10k | 21.38 / 0.700 / 0.360 | 18.84 / 0.647 / 0.431 |
+| 026, 10k (of 30k) | 21.68 / 0.718 / 0.336 | 19.17 / 0.652 / 0.416 |
+| **026, 30k** | **22.61 / 0.738 / 0.315** | 18.93 / 0.658 / 0.417 |
+| 022 full (1016), 60k, 120 scenes | 20.59 / 0.691 / 0.372 | **20.08** (same 3 scenes) |
+
+- **Seen +1.23 dB** over 025 (+0.30 at the same step count), better on all 10 scenes:
+  032dee9f 22.38 → 24.22, 165f5af8 20.77 → 21.45, 1de58be5 23.82 → 25.89, 2beaca31 21.13 →
+  22.57, 3bb3bb4d 22.58 → 24.19, 9fb0588f 20.88 → 22.02, a401469c 20.97 → 21.78, d904ae29
+  19.19 → 20.56, e78f8ceb 19.20 → 20.52, ff592398 22.85 → 22.94. Train PSNR ~22.5 (last
+  5k steps) ≈ seen eval: the underfitting gap of 025 (21.1 vs 21.4) is gone.
+- **Unseen does not improve**: 19.32 at 1k (best), 18.7–19.2 from 2k on, 18.93 at the end
+  (+0.09 over 025, within noise). Per scene: 07d9f972 20.20, 0a1b7c20 19.23, 26fd2335 17.35.
+  Bounded unseen 19.71, unbounded (26fd2335 only) 17.35.
+- The extra capacity goes into the 10 training scenes. The full run with the narrow model
+  and old features is +1.15 dB better on the same 3 unseen scenes (20.08: 07d9f972 20.76,
+  0a1b7c20 21.05, 26fd2335 18.43): scene count matters more for generalization than width.
+  Not a clean comparison (1016: 1M / 1.25M points, old features + old sigma, 60k steps x 64
+  views).
+- Next: the wide model on the full data (bf16; memory check at 1M / 1.25M points, job 1352).
+
+---
+
+## 2026-10-26 · 027 — wide model on the full data, bf16 (120 scenes, 60k steps)
+
+**Why.** 026 fixed the underfitting on 10 scenes (seen +1.23 dB) but not unseen (18.93),
+while the narrow full run (1016) reached 20.08 on the same 3 unseen scenes: generalization
+needs the scene count. 027 = 026's model on 1016's setup.
+
+**Change** vs 1016 (022 full): 026's model (`input.feature_mlp_dim` 128, `model.enc_channels`
+(64, 128, 192, 384, 504), `enc_num_head` (4, 8, 12, 16, 21), `dec_depths` (1, 1, 1, 1),
+`dec_channels` (128, 128, 192, 384), `dec_num_head` (4, 4, 8, 16), `head.skip_dim` 128), the
+v2_trim features + `input.sigma_from=sky`, and **`trainer.amp=bf16`** (new option: autocast
+on the model forward; spconv runs fp16, predictions cast back to fp32). Rest as 1016: train
+split, 1M / 1.25M points + all sky, 2 x full H200 x grad accum 4 x 8 views = 64 views per
+update, LR 4e-4, 60k steps, eval every 2000 on 10 eval_seen + 13 eval_unseen. Three changes
+at once vs 1016 (width, features, sigma).
+
+Memory check (job 1352, 1 H200, 40 steps on 4 training scenes at full points): bf16 72 GB
+allocated / 76 GB reserved, ~2.5 s/step; fp32 98 / 105 GB, ~5.6 s/step (bf16: −27 % memory,
+2.2x faster). Submitted with `jobs/ffgsplat_027_submit.sh` (96 CPUs, 700G, 72 h, one job;
+expected ~45 h).
+
+**Results: running.**
 
 ---
 
