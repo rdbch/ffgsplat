@@ -416,6 +416,15 @@ class TrainerConfig:
     # memory, roughly one extra backbone forward per step). Doesn't change the
     # model, so checkpoints resume with it on or off.
     grad_checkpoint: bool = False
+    # Mixed precision of the model's forward (`torch.autocast`): "none" (fp32) or
+    # "bf16". Weights, optimizer, rendering and loss stay fp32; the predictions are
+    # cast back to fp32. spconv 2.3 has no bf16 kernels: under bf16 autocast its
+    # sparse convs run in fp16 (and LitePT's attention is fp16 for flash-attn anyway).
+    amp: str = "none"
+    # Profiling: record the CUDA allocations of the first `memory_snapshot_steps`
+    # training steps, dump them to `<output_dir>/memory_snapshot_rank<r>.pickle`
+    # (view at pytorch.org/memory_viz) and stop. 0 = off.
+    memory_snapshot_steps: int = 0
     # Gradient accumulation: micro-batches per optimizer step. Each micro-batch
     # is `data.train_batch_size` views of one scene (a random one with several
     # scenes) with its own augmentation; the update uses their mean gradient,
@@ -880,6 +889,11 @@ class Trainer:
             raise ValueError("trainer.frustum_cull with input.pos_clamp_percentile > 0: the clamp radius would follow the culled cloud")
         if self.cfg.trainer.random_bkgd_mode not in ("color", "pixel"):
             raise ValueError(f"trainer.random_bkgd_mode must be color or pixel, got {self.cfg.trainer.random_bkgd_mode!r}")
+        if self.cfg.trainer.amp not in ("none", "bf16"):
+            raise ValueError(f"trainer.amp must be none or bf16, got {self.cfg.trainer.amp!r}")
+        snapshot_steps = self.cfg.trainer.memory_snapshot_steps
+        if snapshot_steps:
+            torch.cuda.memory._record_memory_history(max_entries=500_000)
         for self.step in range(self.start_step, num_steps):
             batches = []
             for _ in range(self.cfg.trainer.grad_accum_steps):
@@ -894,6 +908,13 @@ class Trainer:
             # Wall time of the update (loading excluded, GPU synced by `.item()`s).
             metrics["step_time"] = time.perf_counter() - start
             self.log(metrics, self.step)
+            if snapshot_steps and self.step + 1 - self.start_step >= snapshot_steps:
+                path = os.path.join(self.cfg.trainer.output_dir, f"memory_snapshot_rank{self.rank}.pickle")
+                os.makedirs(self.cfg.trainer.output_dir, exist_ok=True)
+                torch.cuda.memory._dump_snapshot(path)
+                torch.cuda.memory._record_memory_history(enabled=None)
+                print(f"Memory snapshot of {snapshot_steps} steps: {path}")
+                break
 
             # Eval split by scene over the ranks (a single scene: rank 0 only);
             # checkpoints on rank 0 only. The others wait.
@@ -921,6 +942,12 @@ class Trainer:
         if mode == "random":
             return None
         return [s.parser.camtoworlds[s.train_dataset.indices][:, :3, 3] for s in self.scenes]
+
+    def _autocast(self):
+        """`torch.autocast` for the model's forward with `trainer.amp="bf16"`."""
+        if self.cfg.trainer.amp == "bf16":
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        return contextlib.nullcontext()
 
     def _empty_cuda_cache(self):
         if self.device.type == "cuda":
@@ -1066,7 +1093,9 @@ class Trainer:
 
         # Predict raw GS params for every Gaussian once, with activations as in
         # `simple_trainer.py`'s `rasterize_splats`.
-        splats = self.model(point, pos_radius=pos_radius)
+        with self._autocast():
+            splats = self.model(point, pos_radius=pos_radius)
+        splats = {k: v.float() for k, v in splats.items()}
         # Render/backprop one view at a time into a detached copy of the
         # predictions, then push the accumulated gradient through the model in a
         # single backward: same gradients as rendering the whole batch at once,
@@ -1258,8 +1287,9 @@ class Trainer:
             grid_size=self.cfg.trainer.point_grid_size,
             offset=torch.tensor([coord.shape[0]], device=self.device),
         )
-        with bn_batch_stats(self.model, self.cfg.trainer.eval_bn_batch_stats):
+        with bn_batch_stats(self.model, self.cfg.trainer.eval_bn_batch_stats), self._autocast():
             splats = self.model(point, pos_radius=scene.fixed_pos_radius)
+        splats = {k: v.float() for k, v in splats.items()}
         splats = {
             "means": coord + splats["offsets"] if "offsets" in splats else coord,
             "quats": splats["quats"],
